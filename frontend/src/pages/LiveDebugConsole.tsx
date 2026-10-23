@@ -9,6 +9,7 @@ import { liveDebugApi } from '../api/liveDebug';
 import { LiveAppStatusCard } from '../components/live-debug/LiveAppStatusCard';
 import { EvidenceTimeline } from '../components/live-debug/EvidenceTimeline';
 import { HypothesisCriticCard } from '../components/live-debug/HypothesisCriticCard';
+import { FourAgentTraceCard } from '../components/live-debug/FourAgentTraceCard';
 import { PatchReviewModal } from '../components/live-debug/PatchReviewModal';
 import { TestResultsPanel } from '../components/live-debug/TestResultsPanel';
 import { RecoveryVerification } from '../components/live-debug/RecoveryVerification';
@@ -225,6 +226,15 @@ export const LiveDebugConsole: React.FC = () => {
         />
       )}
 
+      {/* Four-Agent Architecture & Log Intelligence Trace */}
+      {investigation && (
+        <FourAgentTraceCard
+          agentTraces={investigation.agent_traces}
+          logIntelligence={investigation.log_intelligence}
+          historicalCases={investigation.retrieved_historical_cases}
+        />
+      )}
+
       {/* Hypotheses & Critic Falsification Card */}
       {investigation && (
         <HypothesisCriticCard
@@ -236,9 +246,12 @@ export const LiveDebugConsole: React.FC = () => {
         />
       )}
 
-      {/* Evidence Timeline */}
+      {/* Evidence Timeline with Mined Log Templates */}
       {investigation && (
-        <EvidenceTimeline evidence={investigation.evidence_collected} />
+        <EvidenceTimeline
+          evidence={investigation.evidence_collected}
+          logIntelligence={investigation.log_intelligence}
+        />
       )}
 
       {/* Process Terminal Output Toggle */}

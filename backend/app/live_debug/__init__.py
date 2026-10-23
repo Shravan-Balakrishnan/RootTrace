@@ -15,3 +15,11 @@ from .input_guardrails import InputGuardrails
 from .evidence_sanitizer import EvidenceSanitizer
 from .output_validator import OutputValidator
 from .run_state_store import LiveRunStateStore
+from .log_intelligence import LogIntelligenceMiner, LogIntelligenceReport, LogTemplateRecord
+from .agents import (
+    EvidenceLogIntelligenceAgent,
+    DiagnosisInvestigationAgent,
+    AdversarialCriticAgent,
+    RepairVerificationAgent,
+    AgentExecutionRecord
+)

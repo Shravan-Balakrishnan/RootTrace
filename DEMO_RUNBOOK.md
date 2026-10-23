@@ -97,23 +97,26 @@ To prove authentic repair, the presenter manually introduces a defect into `live
 
 ## 5. Triggering & Inspecting the Failure
 
-1. In the Live Debug Console, click **Trigger Health Check & Regression Test**.
+1. In the Live Debug Console, click **Run Diagnostics / Tests** or trigger a failing order request.
 2. **Observe Failure Telemetry:**
    - Health status changes to degraded / failing.
    - Captured exception appears in the console:
      `ZeroDivisionError: division by zero` in `app/services.py:59`.
-   - The RootTrace Evidence Collector packages process logs, test tracebacks, and git diffs.
-   - Secret Scanner validates and sanitizes all telemetry.
+   - **Agent 1 (Evidence & Log Intelligence):**
+     - Collects process logs, test tracebacks, and git diffs.
+     - Redacts secrets and neutralizes any injection payloads.
+     - **Drain3 Log Intelligence:** Clusters repeating log messages into structured templates (e.g., `Callback failed for order <NUM>`) and records occurrence counts and representative samples.
 
 ---
 
-## 6. Live Investigation, Critic Veto & Patch Proposal
+## 6. Four-Agent Live Investigation & Critic Review
 
 1. Click **Investigate Incident**.
-2. **Review AI & Critic Trace:**
-   - **Hypothesis 1 (Leading):** Service logic calculation fault in `app/services.py`.
-   - **Hypothesis 2 (Competing):** Transient network port or OS binding error.
-   - **Critic Verification:** Competing hypothesis falsified; leading hypothesis corroborated by regression test stack trace.
+2. **Observe Four-Agent Orchestration Card:**
+   - **Agent 1 (Evidence & Log Intelligence):** Completed. Displays Drain3 template mining engine badge and sanitized records count.
+   - **Agent 2 (Diagnosis & Investigation):** Formulates competing hypotheses (Leading: `H1` Code Defect 88% vs Competing: `H2` Port Contention 22%). Retrieves verified historical cases via Continual Learning (`HIST-001`).
+   - **Agent 3 (Adversarial Critic):** Evaluates temporal consistency and checks for contradictions. Corroborates `H1` and issues **Critic Approval** (or Vetoes if evidence is ambiguous).
+   - **Agent 4 (Repair & Verification):** Synthesizes candidate patch proposal, validates workspace containment, and binds cryptographic SHA-256 hash.
 3. **Inspect Candidate Patch Proposal:**
    - Unified diff preview:
      ```diff

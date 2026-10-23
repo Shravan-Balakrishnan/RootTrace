@@ -1,12 +1,13 @@
 import React, { useState } from 'react';
-import { SanitizedEvidenceRecord } from '../../types/liveDebug';
-import { ShieldCheck, AlertTriangle, Eye, Database, FileCode, Activity } from 'lucide-react';
+import { SanitizedEvidenceRecord, LogIntelligenceReport } from '../../types/liveDebug';
+import { ShieldCheck, AlertTriangle, Eye, Database, FileCode, Activity, Cpu } from 'lucide-react';
 
 interface Props {
   evidence: SanitizedEvidenceRecord[];
+  logIntelligence?: LogIntelligenceReport | null;
 }
 
-export const EvidenceTimeline: React.FC<Props> = ({ evidence }) => {
+export const EvidenceTimeline: React.FC<Props> = ({ evidence, logIntelligence }) => {
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   if (!evidence || evidence.length === 0) {
@@ -28,6 +29,7 @@ export const EvidenceTimeline: React.FC<Props> = ({ evidence }) => {
   const getSourceIcon = (tool: string) => {
     switch (tool) {
       case 'process_logs': return <FileCode size={14} color="#38bdf8" />;
+      case 'log_intelligence': return <Cpu size={14} color="#38bdf8" />;
       case 'regression_test_runner': return <Activity size={14} color="#f59e0b" />;
       case 'git_inspector': return <FileCode size={14} color="#a855f7" />;
       default: return <Database size={14} color="#10b981" />;
@@ -52,6 +54,63 @@ export const EvidenceTimeline: React.FC<Props> = ({ evidence }) => {
           <ShieldCheck size={13} /> Sanitized & Secret-Scanned
         </span>
       </div>
+
+      {/* Mined Log Templates Display */}
+      {logIntelligence && logIntelligence.templates.length > 0 && (
+        <div style={{
+          background: 'rgba(56, 189, 248, 0.06)',
+          border: '1px solid rgba(56, 189, 248, 0.2)',
+          borderRadius: '6px',
+          padding: '10px 12px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '6px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: '11px', fontWeight: 600, color: '#38bdf8' }}>
+              Mined Log Templates ({logIntelligence.templates.length})
+            </span>
+            <span style={{
+              fontSize: '10px',
+              fontFamily: 'var(--font-mono)',
+              padding: '1px 6px',
+              borderRadius: '3px',
+              background: 'rgba(56, 189, 248, 0.15)',
+              color: '#7dd3fc'
+            }}>
+              Engine: {logIntelligence.implementation_used}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+            {logIntelligence.templates.slice(0, 4).map((t) => (
+              <div
+                key={t.template_id}
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  background: 'rgba(0, 0, 0, 0.25)',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: '11px'
+                }}
+              >
+                <span style={{ color: '#e2e8f0' }}>{t.template_text}</span>
+                <span style={{
+                  color: '#38bdf8',
+                  fontSize: '10px',
+                  background: 'rgba(56, 189, 248, 0.1)',
+                  padding: '1px 5px',
+                  borderRadius: '3px'
+                }}>
+                  {t.occurrence_count}x
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         {evidence.map((item) => {

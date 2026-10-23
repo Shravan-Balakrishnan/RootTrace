@@ -86,6 +86,48 @@ export interface PatchProposal {
   created_at: string;
 }
 
+export interface LogTemplateRecord {
+  template_id: string;
+  template_text: string;
+  occurrence_count: number;
+  first_seen: string;
+  last_seen: string;
+  sample_messages: string[];
+  source_refs: string[];
+  parameters_extracted?: any[];
+}
+
+export interface LogIntelligenceReport {
+  implementation_used: string;
+  templates: LogTemplateRecord[];
+  total_messages_processed: number;
+  unique_templates_count: number;
+  degraded_mode: boolean;
+  status_message: string;
+  extraction_errors: string[];
+}
+
+export interface AgentExecutionRecord {
+  agent_id: string;
+  role_name: string;
+  status: string;
+  summary: string;
+  tool_calls: string[];
+  artifacts_produced: string[];
+  execution_time_ms: number;
+  timestamp: string;
+  details?: Record<string, any>;
+}
+
+export interface HistoricalIncidentCase {
+  case_id: string;
+  signature: string;
+  root_cause: string;
+  patch_summary: string;
+  resolved_at: string;
+  verified: boolean;
+}
+
 export interface LiveInvestigationResult {
   run_id: string;
   phase: string;
@@ -99,6 +141,9 @@ export interface LiveInvestigationResult {
   abstained: boolean;
   abstention_reason?: string | null;
   decision_trace: string[];
+  agent_traces?: AgentExecutionRecord[];
+  log_intelligence?: LogIntelligenceReport | null;
+  retrieved_historical_cases?: HistoricalIncidentCase[];
 }
 
 export interface LiveRecoveryResult {

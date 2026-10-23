@@ -21,7 +21,8 @@ from ..live_debug import (
     RecoveryVerifier,
     LiveAuditStore,
     AuditRecord,
-    LiveRunStateStore
+    LiveRunStateStore,
+    EvidenceLogIntelligenceAgent
 )
 from ..safety.auth import authenticate_and_authorize_approver
 
@@ -32,6 +33,7 @@ process_mgr = LiveDebugProcessManager()
 health_mon = HealthMonitor(host=process_mgr.host, port=process_mgr.port)
 test_runner = LiveDebugTestRunner(timeout_seconds=20.0)
 evidence_col = LiveEvidenceCollector(process_mgr, health_mon, test_runner)
+agent_1 = EvidenceLogIntelligenceAgent(evidence_col)
 investigation_engine = LiveInvestigationEngine()
 patch_mgr = PatchManager()
 workspace_mgr = WorkspaceManager()
@@ -118,16 +120,17 @@ def run_live_investigation():
     """
     run_id = f"RUN-{uuid.uuid4().hex[:8].upper()}"
 
-    # 1. Collect real telemetry and failure evidence
-    collected = evidence_col.collect_all_evidence(run_id)
+    # 1. Agent 1: Collect real telemetry, sanitize secrets, mine log templates via Drain3/fallback
+    collected, a1_record = agent_1.execute(run_id)
 
     # 2. Create isolated workspace
     workspace_dir = workspace_mgr.create_isolated_workspace(run_id=run_id)
     # Save clean pre-patch snapshot
     workspace_mgr.create_snapshot(workspace_dir, "pre_patch")
 
-    # 3. Run investigation loop
+    # 3. Agent 2, 3, 4: Diagnosis, Critic Veto, and Repair Synthesis
     inv_res = investigation_engine.run_investigation(collected, workspace_id=workspace_dir)
+    inv_res.agent_traces.insert(0, a1_record)
 
     if inv_res.proposed_patch:
         run_state_store.create_run(

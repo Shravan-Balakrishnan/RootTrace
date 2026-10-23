@@ -24,6 +24,15 @@ from .input_guardrails import InputGuardrails
 from .output_validator import OutputValidator, OutputValidationResult
 from .patch_manager import PatchProposal
 
+from .agents import (
+    AgentExecutionRecord,
+    DiagnosisInvestigationAgent,
+    AdversarialCriticAgent,
+    RepairVerificationAgent
+)
+from .log_intelligence import LogIntelligenceReport
+from .audit import HistoricalIncidentCase
+
 logger = logging.getLogger("roottrace.live_debug.investigation")
 
 
@@ -40,16 +49,23 @@ class LiveInvestigationResult(BaseModel):
     abstained: bool = False
     abstention_reason: Optional[str] = None
     decision_trace: List[str] = Field(default_factory=list)
+    agent_traces: List[AgentExecutionRecord] = Field(default_factory=list)
+    log_intelligence: Optional[LogIntelligenceReport] = None
+    retrieved_historical_cases: List[HistoricalIncidentCase] = Field(default_factory=list)
 
 
 class LiveInvestigationEngine:
     """
-    Coordinates hypothesis generation, Critic evaluation, and patch proposal for live incidents.
+    Coordinates hypothesis generation, Critic evaluation, and patch proposal for live incidents
+    using the modular Four-Agent Architecture.
     """
 
     def __init__(self, llm_provider: Optional[LLMProvider] = None):
         self.llm = llm_provider or LLMProvider()
         self.guardrails = InputGuardrails()
+        self.diagnosis_agent = DiagnosisInvestigationAgent()
+        self.critic_agent = AdversarialCriticAgent()
+        self.repair_agent = RepairVerificationAgent()
 
     def run_investigation(
         self,
@@ -58,12 +74,15 @@ class LiveInvestigationEngine:
     ) -> LiveInvestigationResult:
         run_id = collected.run_id
         trace: List[str] = []
+        agent_traces: List[AgentExecutionRecord] = []
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
         trace.append(f"[{now}] Live investigation initiated for run {run_id}")
 
         # 1. Check if an actual failure was observed
         if not collected.is_failing:
             trace.append(f"[{now}] Abstention: Testbed application is currently healthy. No failure detected.")
+            _, _, a2_record = self.diagnosis_agent.execute(collected, workspace_id)
+            agent_traces.append(a2_record)
             return LiveInvestigationResult(
                 run_id=run_id,
                 phase="RESOLVED",
@@ -74,84 +93,36 @@ class LiveInvestigationEngine:
                 diagnosis="No failure detected. Live application and regression tests are passing normally.",
                 abstained=True,
                 abstention_reason="Application is healthy. Incident not triggered.",
-                decision_trace=trace
+                decision_trace=trace,
+                agent_traces=agent_traces,
+                log_intelligence=collected.log_intelligence,
+                retrieved_historical_cases=[]
             )
-
-        known_ev_ids = {r.id for r in collected.evidence_records}
-        evidence_dicts = [r.model_dump() for r in collected.evidence_records]
-
-        # 2. Check for contradictory or ambiguous evidence
-        logs_ev = next((r for r in collected.evidence_records if r.source_tool == "process_logs"), None)
-        test_ev = next((r for r in collected.evidence_records if r.source_tool == "regression_test_runner"), None)
 
         trace.append(f"[{now}] Collected {len(collected.evidence_records)} evidence records from process, tests, and health monitors")
 
-        # 3. Formulate Competing Hypotheses
-        # Analyze error lines
-        error_msgs = []
-        if test_ev and test_ev.data.get("error_summary"):
-            error_msgs.extend(test_ev.data.get("error_summary"))
-        if logs_ev and logs_ev.data.get("traceback"):
-            error_msgs.extend(logs_ev.data.get("traceback"))
+        # Include log intelligence in decision trace if available
+        if collected.log_intelligence:
+            trace.append(
+                f"[{now}] Log Intelligence ({collected.log_intelligence.implementation_used}): "
+                f"Mined {collected.log_intelligence.unique_templates_count} unique template(s) "
+                f"from {collected.log_intelligence.total_messages_processed} log line(s)."
+            )
 
-        error_context = "\n".join(error_msgs) if error_msgs else collected.summary
+        # 2. Agent 2: Diagnosis & Investigation
+        hypotheses, retrieved_cases, a2_record = self.diagnosis_agent.execute(collected, workspace_id)
+        agent_traces.append(a2_record)
+        leading_hyp = hypotheses[0] if hypotheses else None
 
-        hypotheses: List[Hypothesis] = []
-        # Hypothesis 1: Business Logic / Calculation Fault
-        h1_id = f"HYP-{uuid.uuid4().hex[:4].upper()}"
-        h1 = Hypothesis(
-            id=h1_id,
-            title="Service Logic Calculation or Parameter Handling Defect",
-            description=f"A code change in live-lab/app/services.py or main.py introduced a runtime fault: {error_context[:100]}",
-            supporting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool in ("regression_test_runner", "process_logs")],
-            contradicting_evidence_ids=[],
-            expected_evidence=["Regression test failure output", "Exception traceback"],
-            evidence_still_needed=[],
-            falsification_criteria="All regression tests pass without calculation or parameter errors.",
-            status=HypothesisStatus.SUPPORTED,
-            score=0.85
-        )
-        hypotheses.append(h1)
+        trace.append(f"[{now}] Agent 2 formulated {len(hypotheses)} competing hypotheses. Leading: {leading_hyp.title if leading_hyp else 'None'}")
+        if retrieved_cases:
+            trace.append(f"[{now}] Continual Learning: Retrieved {len(retrieved_cases)} similar historical case(s) as supporting evidence.")
 
-        # Hypothesis 2: Transient Infrastructure / Port Conflict (Competing Hypothesis)
-        h2_id = f"HYP-{uuid.uuid4().hex[:4].upper()}"
-        h2 = Hypothesis(
-            id=h2_id,
-            title="Transient Process or Network Binding Failure",
-            description="The microservice was temporarily unreachable due to network port contention or OS resource starvation.",
-            supporting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool == "health_probe"],
-            contradicting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool == "regression_test_runner"],
-            expected_evidence=["OS socket binding error in process logs"],
-            evidence_still_needed=["Socket error logs"],
-            falsification_criteria="Service binds and responds on configured port without error.",
-            status=HypothesisStatus.WEAKENED,
-            score=0.25
-        )
-        hypotheses.append(h2)
+        # 3. Agent 3: Adversarial Critic
+        critic_eval, is_critic_ok, veto_reason, a3_record = self.critic_agent.execute(leading_hyp, collected)
+        agent_traces.append(a3_record)
+        trace.append(f"[{now}] Agent 3 Critic evaluation completed. Approved: {is_critic_ok}")
 
-        trace.append(f"[{now}] Developed competing hypotheses: H1 (Code defect: {h1.title}) vs H2 ({h2.title})")
-
-        # 4. Critic / Veto Evaluation
-        # Challenge the leading hypothesis against evidence
-        contradictions = []
-        if not error_msgs and collected.observed_failure_type == "HEALTH_CHECK_FAILED":
-            # Ambiguous: health probe failed but no logs or test failure -> Critic demands more evidence
-            contradictions.append("Health check failed without application traceback or test assertion failure.")
-
-        critic = CriticEvaluation(
-            hypothesis_id=h1_id,
-            temporal_order_valid=True,
-            contradictions_found=contradictions,
-            missing_evidence_found=["Direct source diff confirmation"] if not any(r.source_tool == "git_inspector" for r in collected.evidence_records) else [],
-            alternative_explanations=["Transient OS or network socket binding failure"],
-            critique_summary="Leading hypothesis supported by captured test assertions and process logs." if not contradictions else "Evidence is ambiguous.",
-            is_valid_candidate=(len(contradictions) == 0)
-        )
-
-        trace.append(f"[{now}] Critic evaluation completed. Valid candidate: {critic.is_valid_candidate}")
-
-        # If Critic vetoes, abstain
-        is_critic_ok, veto_reason = OutputValidator.validate_critic_approval(critic)
         if not is_critic_ok:
             trace.append(f"[{now}] Abstention: Critic vetoed proposal ({veto_reason})")
             return LiveInvestigationResult(
@@ -160,18 +131,34 @@ class LiveInvestigationEngine:
                 failure_observed=collected.observed_failure_type,
                 evidence_collected=collected.evidence_records,
                 hypotheses=hypotheses,
-                critic_evaluation=critic,
+                critic_evaluation=critic_eval,
                 verification_status=VerificationStatus.CONFLICTING_EVIDENCE,
                 diagnosis=f"Investigation halted by Critic: {veto_reason}",
                 abstained=True,
                 abstention_reason=veto_reason,
-                decision_trace=trace
+                decision_trace=trace,
+                agent_traces=agent_traces,
+                log_intelligence=collected.log_intelligence,
+                retrieved_historical_cases=retrieved_cases
             )
 
-        # 5. Propose Candidate Patch
-        patch_proposal = self._generate_candidate_patch(run_id, workspace_id, error_context, collected.evidence_records)
+        # 4. Agent 4: Repair & Verification (Patch Synthesis & Proposal)
+        error_msgs = []
+        for ev in collected.evidence_records:
+            if ev.source_tool == "regression_test_runner" and ev.data.get("error_summary"):
+                error_msgs.extend(ev.data["error_summary"])
+            elif ev.source_tool == "process_logs" and ev.data.get("traceback"):
+                error_msgs.extend(ev.data["traceback"])
+        error_context = "\n".join(error_msgs) if error_msgs else collected.summary
 
-        trace.append(f"[{now}] Generated candidate patch proposal: {patch_proposal.patch_hash[:12]} targeting {patch_proposal.target_files}")
+        patch_proposal, a4_record = self.repair_agent.propose_patch(
+            run_id=run_id,
+            workspace_id=workspace_id,
+            error_context=error_context,
+            evidence=collected.evidence_records
+        )
+        agent_traces.append(a4_record)
+        trace.append(f"[{now}] Agent 4 generated candidate patch proposal: {patch_proposal.patch_hash[:12]} targeting {patch_proposal.target_files}")
 
         return LiveInvestigationResult(
             run_id=run_id,
@@ -179,12 +166,15 @@ class LiveInvestigationEngine:
             failure_observed=collected.observed_failure_type,
             evidence_collected=collected.evidence_records,
             hypotheses=hypotheses,
-            critic_evaluation=critic,
+            critic_evaluation=critic_eval,
             verification_status=VerificationStatus.VERIFIED,
             diagnosis=f"Identified verified code defect causing {collected.observed_failure_type}: {error_context[:120]}",
             proposed_patch=patch_proposal,
             abstained=False,
-            decision_trace=trace
+            decision_trace=trace,
+            agent_traces=agent_traces,
+            log_intelligence=collected.log_intelligence,
+            retrieved_historical_cases=retrieved_cases
         )
 
     def _generate_candidate_patch(

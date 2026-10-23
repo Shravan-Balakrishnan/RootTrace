@@ -15,6 +15,7 @@ from .process_manager import LiveDebugProcessManager
 from .health_monitor import HealthMonitor, HealthStatus
 from .test_runner import LiveDebugTestRunner, TestExecutionResult
 from .evidence_sanitizer import EvidenceSanitizer, SanitizedEvidenceRecord, SanitizationSummary
+from .log_intelligence import LogIntelligenceMiner, LogIntelligenceReport
 
 
 class CollectedLiveEvidence(BaseModel):
@@ -24,6 +25,7 @@ class CollectedLiveEvidence(BaseModel):
     sanitization_summary: SanitizationSummary
     is_failing: bool
     summary: str
+    log_intelligence: Optional[LogIntelligenceReport] = None
 
 
 class LiveEvidenceCollector:
@@ -115,6 +117,23 @@ class LiveEvidenceCollector:
                     failure_type = "RUNTIME_EXCEPTION"
                 failure_descriptions.append("Exception traceback detected in application process logs")
 
+        # 3b. Log Intelligence & Template Mining (Drain3 / Fallback)
+        log_intel_report: Optional[LogIntelligenceReport] = None
+        if recent_logs:
+            miner = LogIntelligenceMiner()
+            log_intel_report = miner.mine_log_templates(recent_logs)
+            top_templates_str = ", ".join(
+                f"'{t.template_text}' (x{t.occurrence_count})" for t in log_intel_report.templates[:3]
+            )
+            raw_items.append({
+                "id": f"ev_log_intel_{run_id[:6]}",
+                "source_tool": "log_intelligence",
+                "timestamp": now,
+                "source_ref": f"{log_intel_report.implementation_used}:template_miner",
+                "summary": f"Mined {log_intel_report.unique_templates_count} log template(s) via {log_intel_report.implementation_used}: {top_templates_str or 'No repeated templates'}",
+                "data": log_intel_report.model_dump()
+            })
+
         # 4. Test Execution Evidence
         test_res = self.test_runner.run_tests()
         raw_items.append({
@@ -154,7 +173,8 @@ class LiveEvidenceCollector:
             evidence_records=sanitized_records,
             sanitization_summary=summary,
             is_failing=failure_detected,
-            summary=overall_summary
+            summary=overall_summary,
+            log_intelligence=log_intel_report
         )
 
     def _get_live_lab_git_diff(self) -> Optional[str]:
