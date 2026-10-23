@@ -147,15 +147,20 @@ class Orchestrator:
         self._attribute_evidence_to_hypotheses()
         return {"tool_name": tool_name, "arguments": tool_args, "result": res}
 
-    def step_investigate_tools(self, max_tool_steps: int = 4):
-        """Phase: INVESTIGATE USING TOOLS - Target unresolved questions"""
+    def step_investigate_tools(self, max_tool_steps: int = 5):
+        """Phase: INVESTIGATE USING TOOLS - Target unresolved questions within strict budget"""
         if self.incident.current_phase != InvestigationPhase.INVESTIGATING:
             self._transition_to(InvestigationPhase.INVESTIGATING, "Invoking investigation tools to test hypotheses")
 
+        invoked_count = 0
         for _ in range(max_tool_steps):
             act = self.step_single_tool()
             if not act:
+                self.incident.decision_trace.append(f"Tool budget stop: No further diagnostic tools needed ({invoked_count} tools invoked).")
                 break
+            invoked_count += 1
+        else:
+            self.incident.decision_trace.append(f"Tool budget limit reached ({max_tool_steps} tools executed). Proceeding to critique.")
 
     def _attribute_evidence_to_hypotheses(self):
         """Correlate collected evidence with hypotheses and calculate scores."""
