@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RootTrace — Autonomous Incident Investigation & Verified Recovery</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <!-- Top Navigation Bar -->
+  <header>
+    <div class="brand">
+      <div class="brand-icon">RT</div>
+      <div>
+        <div class="brand-title">ROOTTRACE</div>
+        <div class="brand-tagline">Autonomous Incident Investigator</div>
+      </div>
+    </div>
+
+    <div class="header-controls">
+      <span id="system-mode-badge" class="badge badge-info">INITIALIZING</span>
+      
+      <select id="scenario-select" class="scenario-select" title="Select Incident Scenario">
+        <option value="callback_race">Scenario A: Concurrent Webhook Race Condition</option>
+        <option value="db_degradation">Scenario B: Database Connection Pool Starvation</option>
+        <option value="payment_failure">Scenario C: Third-Party Payment Gateway Outage</option>
+      </select>
+
+      <button id="btn-step" class="btn btn-secondary">
+        <span>↷</span> Step Phase
+      </button>
+
+      <button id="btn-run" class="btn btn-primary">
+        <span>⚡</span> Auto-Investigate
+      </button>
+
+      <button id="btn-pause" class="btn btn-secondary">
+        Pause Autonomy
+      </button>
+    </div>
+  </header>
+
+  <!-- Three-Column Incident Command Layout -->
+  <main class="app-container">
+    
+    <!-- Left Column: Overview, Hypotheses & Trace -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">🚨 Incident Status</span>
+        <div style="display: flex; gap: 6px;">
+          <span id="incident-severity-badge" class="badge badge-critical">CRITICAL</span>
+          <span id="incident-status-badge" class="badge badge-info">TRIGGERED</span>
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <div>
+          <h2 id="incident-title" style="font-size: 15px; font-weight: 700; color: #fff; margin-bottom: 4px;">
+            Loading Incident...
+          </h2>
+          <div id="current-phase-label" style="font-size: 11px; color: var(--accent-cyan); font-family: var(--font-mono);">
+            Phase: TRIGGERED
+          </div>
+        </div>
+
+        <!-- Investigation Stepper -->
+        <div class="stepper-container" id="stepper-container">
+          <!-- Populated dynamically by app.js -->
+        </div>
+
+        <!-- Competing Hypotheses -->
+        <div>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <span class="panel-title" style="font-size: 11px;">🔬 Competing Hypotheses</span>
+          </div>
+          <div id="hypotheses-container" style="display: flex; flex-direction: column; gap: 10px;">
+            <!-- Rendered by app.js -->
+          </div>
+        </div>
+
+        <!-- Decision Trace Audit Log -->
+        <div>
+          <span class="panel-title" style="font-size: 11px; margin-bottom: 8px; display: block;">📜 Decision Audit Trace</span>
+          <div id="decision-trace-container" style="max-height: 160px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 6px; padding: 8px; border: 1px solid var(--border-subtle);">
+            <!-- Rendered by app.js -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Center Column: Evidence Graph & Chronological Timeline -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">🕸️ Evidence Graph & Topology</span>
+        <span style="font-size: 11px; color: var(--text-muted);">Click node to inspect evidence</span>
+      </div>
+
+      <div class="panel-body">
+        <canvas id="evidence-graph-canvas"></canvas>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+          <span class="panel-title">⏱️ Multi-Source Timeline</span>
+          <span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">Merged & Chronologically Ordered</span>
+        </div>
+
+        <div id="timeline-container" class="timeline-list" style="overflow-y: auto; max-height: calc(100vh - 440px);">
+          <!-- Rendered by app.js -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Tool Logs, Safety Approval & Recovery Verification -->
+    <section class="panel">
+      <div class="panel-header">
+        <span class="panel-title">🛠️ Tool Activity & Closed-Loop Recovery</span>
+        <span id="tool-count-badge" class="badge badge-muted">0 calls</span>
+      </div>
+
+      <div class="panel-body">
+        <!-- Safety Approval Card -->
+        <div id="approval-card" class="card" style="display: none; border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.05); flex-direction: column;">
+          <!-- Rendered by app.js -->
+        </div>
+
+        <!-- Recovery Verification Result Card -->
+        <div id="recovery-card" class="card" style="display: none; border-color: rgba(16, 185, 129, 0.4); background: rgba(16, 185, 129, 0.05); flex-direction: column;">
+          <!-- Rendered by app.js -->
+        </div>
+
+        <!-- Real Tool Audit Activity Log -->
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span class="panel-title" style="font-size: 11px;">Active Tool Invocations</span>
+        </div>
+        <div id="tool-log-container" style="display: flex; flex-direction: column; gap: 8px; overflow-y: auto; max-height: calc(100vh - 350px);">
+          <!-- Rendered by app.js -->
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Evidence Inspector Modal -->
+  <div id="evidence-modal" class="modal-overlay">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="panel-title">🔍 Evidence Record Details</span>
+        <button id="btn-close-ev" class="btn btn-secondary" style="padding: 4px 10px;">✕</button>
+      </div>
+      <div class="modal-body" id="evidence-details-content">
+        <!-- Injected by app.js -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Postmortem Modal -->
+  <div id="postmortem-modal" class="modal-overlay">
+    <div class="modal-content" style="max-width: 760px;">
+      <div class="modal-header">
+        <span class="panel-title">📄 Verified Incident Postmortem</span>
+        <button id="btn-close-pm" class="btn btn-secondary" style="padding: 4px 10px;">✕</button>
+      </div>
+      <div class="modal-body" id="postmortem-content">
+        <!-- Injected by app.js -->
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
