@@ -18,6 +18,8 @@ class SecretRule:
     description: str
 
 
+MAX_SCAN_CHUNK_BYTES = 512_000  # 500 KB max input size per chunk to prevent ReDoS
+
 # Compiled, bounded regex patterns designed to prevent catastrophic backtracking
 COMPILED_RULES: List[SecretRule] = [
     # 1. Private Keys
@@ -66,7 +68,41 @@ COMPILED_RULES: List[SecretRule] = [
         pattern=re.compile(r"(?i)\bBearer\s+([a-zA-Z0-9_\-\.]{20,})\b"),
         description="HTTP Bearer authentication token"
     ),
-    # 7. Explicit Password / Secret Key Assignments in Config or Code
+    # 7. Slack API Tokens (supports single and multi-segment tokens)
+    SecretRule(
+        rule_id="SEC_SLACK",
+        name="Slack API Token",
+        pattern=re.compile(r"\bxox[baprs]-(?:[0-9a-zA-Z]+-)*[0-9a-zA-Z]{10,64}\b"),
+        description="Slack bot, user, or workspace token"
+    ),
+    # 8. Stripe Secret Keys
+    SecretRule(
+        rule_id="SEC_STRIPE",
+        name="Stripe API Key",
+        pattern=re.compile(r"\b(?:sk|rk)_(?:live|test)_[0-9a-zA-Z]{24,}\b"),
+        description="Stripe secret or restricted API key"
+    ),
+    # 9. JWT-Shaped Credentials (header.payload.signature)
+    SecretRule(
+        rule_id="SEC_JWT",
+        name="JWT Credential",
+        pattern=re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+        description="JSON Web Token containing signed claims"
+    ),
+    # 10. AWS Secret Access Key Multiline Assignment
+    SecretRule(
+        rule_id="SEC_AWS_SECRET",
+        name="AWS Secret Access Key Assignment",
+        pattern=re.compile(
+            r"""(?ix)
+            \b(aws[_-]?secret[_-]?access[_-]?key|aws[_-]?secret[_-]?key)
+            \s*[:=]\s*
+            (['"]?)([A-Za-z0-9\/+=]{40})\2
+            """
+        ),
+        description="AWS secret access key assignment across lines or in config"
+    ),
+    # 11. Explicit Password / Secret Key Assignments in Config or Code
     SecretRule(
         rule_id="SEC_ASSIGNMENT",
         name="Credential Assignment",
@@ -115,9 +151,15 @@ class SecretScanner:
         """
         Scans a text string and returns a ScanResult containing sanitized text and audit metadata.
         Raw secret values are completely discarded and never recorded.
+        Enforces a maximum input size of 500 KB per scanned text chunk before running regex patterns.
         """
         if not text or not isinstance(text, str):
             return ScanResult(sanitized_text=text or "", redactions_count=0)
+
+        # Enforce maximum input size of 500 KB per scanned text chunk before running regex patterns
+        encoded_bytes = text.encode("utf-8", errors="replace")
+        if len(encoded_bytes) > MAX_SCAN_CHUNK_BYTES:
+            text = encoded_bytes[:MAX_SCAN_CHUNK_BYTES].decode("utf-8", errors="ignore") + "\n[TRUNCATED: Exceeded 500KB max scan limit]"
 
         sanitized = text
         total_redactions = 0
@@ -152,6 +194,19 @@ class SecretScanner:
                     total_redactions += n
                     rule_audits.append(RedactionAuditRecord(rule.rule_id, rule.name, n))
 
+            elif rule.rule_id == "SEC_AWS_SECRET":
+                def aws_secret_replacer(m: re.Match) -> str:
+                    nonlocal matches_count
+                    matches_count += 1
+                    full_match = m.group(0)
+                    secret_val = m.group(3)
+                    return full_match.replace(secret_val, f"[REDACTED:{rule.rule_id}]")
+
+                sanitized, n = rule.pattern.subn(aws_secret_replacer, sanitized)
+                if n > 0:
+                    total_redactions += n
+                    rule_audits.append(RedactionAuditRecord(rule.rule_id, rule.name, n))
+
             elif rule.rule_id == "SEC_ASSIGNMENT":
                 def assign_replacer(m: re.Match) -> str:
                     nonlocal matches_count
@@ -166,7 +221,7 @@ class SecretScanner:
                     rule_audits.append(RedactionAuditRecord(rule.rule_id, rule.name, n))
 
             else:
-                # Default whole-match redaction (e.g. API keys, private keys)
+                # Default whole-match redaction (e.g. API keys, private keys, slack, stripe, jwt)
                 def general_replacer(m: re.Match) -> str:
                     nonlocal matches_count
                     matches_count += 1

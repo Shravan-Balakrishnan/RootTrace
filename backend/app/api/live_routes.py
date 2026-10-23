@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 import uuid
 import datetime
+import threading
 
 from ..live_debug import (
     LiveDebugProcessManager,
@@ -36,7 +37,8 @@ workspace_mgr = WorkspaceManager()
 verifier = RecoveryVerifier(test_runner)
 audit_store = LiveAuditStore()
 
-# In-memory registry for active live investigation runs
+# Thread-safe approval concurrency lock and active runs registry
+_APPROVAL_LOCK = threading.Lock()
 _ACTIVE_RUNS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -126,6 +128,7 @@ def run_live_investigation():
         "run_id": run_id,
         "investigation": inv_res,
         "workspace_dir": workspace_dir,
+        "status": "PENDING",
         "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }
 
@@ -137,6 +140,7 @@ def approve_candidate_patch(req: LiveApprovalRequest):
     """
     Applies an approved patch inside the isolated workspace:
     - Strictly verifies caller's authenticated session and authorized role
+    - Rejects concurrent, duplicate, or replayed approvals with HTTP 409 Conflict
     - Verifies expected patch hash to prevent tampering or replay
     - Applies patch to isolated workspace only
     - Runs regression tests
@@ -150,94 +154,142 @@ def approve_candidate_patch(req: LiveApprovalRequest):
         client_claimed_role=req.role
     )
 
-    run_state = _ACTIVE_RUNS.get(req.run_id)
-    if not run_state:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Investigation run '{req.run_id}' not found or expired."
-        )
+    with _APPROVAL_LOCK:
+        run_state = _ACTIVE_RUNS.get(req.run_id)
+        if not run_state:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Investigation run '{req.run_id}' not found or expired."
+            )
 
-    inv: Any = run_state["investigation"]
-    workspace_dir = run_state["workspace_dir"]
+        current_status = run_state.get("status", "PENDING")
+        if current_status in ("APPLYING", "APPLIED", "VALIDATING", "VERIFIED"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflict: Approval already in progress or completed for run '{req.run_id}' (status: {current_status})."
+            )
+        if current_status == "REJECTED":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Conflict: Patch proposal for run '{req.run_id}' was already rejected."
+            )
 
-    if not inv.proposed_patch:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No candidate patch available to approve."
-        )
+        inv: Any = run_state["investigation"]
+        workspace_dir = run_state["workspace_dir"]
 
-    # 2. Patch hash binding verification
-    if inv.proposed_patch.patch_hash != req.patch_hash:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Stale or tampered patch: hash {req.patch_hash} does not match active proposal {inv.proposed_patch.patch_hash}."
-        )
+        if not inv.proposed_patch:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No candidate patch available to approve."
+            )
+
+        # 2. Patch hash and workspace binding verification
+        if inv.proposed_patch.patch_hash != req.patch_hash:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Stale or tampered patch: hash {req.patch_hash} does not match active proposal {inv.proposed_patch.patch_hash}."
+            )
+
+        # Transition state to APPLYING
+        run_state["status"] = "APPLYING"
 
     # 3. Apply patch inside the isolated workspace
-    apply_res = patch_mgr.apply_patch_to_workspace(
-        diff_text=inv.proposed_patch.diff,
-        workspace_dir=workspace_dir,
-        expected_patch_hash=req.patch_hash
-    )
-
-    if not apply_res.success:
-        # Rollback on application failure
-        workspace_mgr.rollback(workspace_dir, "pre_patch")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Patch application failed in workspace: {apply_res.error_message}"
+    try:
+        apply_res = patch_mgr.apply_patch_to_workspace(
+            diff_text=inv.proposed_patch.diff,
+            workspace_dir=workspace_dir,
+            expected_patch_hash=req.patch_hash
         )
 
-    # 4. Independent Recovery Verification
-    recovery_res = verifier.verify_workspace_recovery(workspace_dir)
+        if not apply_res.success:
+            with _APPROVAL_LOCK:
+                run_state["status"] = "FAILED"
+            # Rollback on application failure
+            workspace_mgr.rollback(workspace_dir, "pre_patch")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Patch application failed in workspace: {apply_res.error_message}"
+            )
 
-    # 5. Persist Immutable Audit Record
-    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    audit_rec = AuditRecord(
-        run_id=req.run_id,
-        timestamp=now,
-        observed_failure=inv.failure_observed,
-        evidence_count=len(inv.evidence_collected),
-        hypotheses_evaluated=[h.title for h in inv.hypotheses],
-        critic_verdict=inv.critic_evaluation.critique_summary if inv.critic_evaluation else "N/A",
-        diagnosis=inv.diagnosis,
-        patch_hash=req.patch_hash,
-        target_workspace=workspace_dir,
-        approver=principal.email,
-        approver_role=principal.role,
-        approval_timestamp=now,
-        test_result_summary=recovery_res.summary,
-        recovery_verified=recovery_res.all_checks_passed,
-        audit_tags=["live_lab", inv.failure_observed]
-    )
-    audit_store.record_investigation(audit_rec)
+        with _APPROVAL_LOCK:
+            run_state["status"] = "APPLIED"
 
-    return {
-        "success": recovery_res.all_checks_passed,
-        "run_id": req.run_id,
-        "applied_patch_hash": req.patch_hash,
-        "modified_files": apply_res.modified_files,
-        "recovery_result": recovery_res.model_dump(),
-        "approver": {
-            "email": principal.email,
-            "role": principal.role
+        # 4. Independent Recovery Verification
+        with _APPROVAL_LOCK:
+            run_state["status"] = "VALIDATING"
+
+        recovery_res = verifier.verify_workspace_recovery(workspace_dir)
+
+        with _APPROVAL_LOCK:
+            run_state["status"] = "VERIFIED" if recovery_res.all_checks_passed else "FAILED"
+
+        # 5. Persist Immutable Audit Record
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        audit_rec = AuditRecord(
+            run_id=req.run_id,
+            timestamp=now,
+            observed_failure=inv.failure_observed,
+            evidence_count=len(inv.evidence_collected),
+            hypotheses_evaluated=[h.title for h in inv.hypotheses],
+            critic_verdict=inv.critic_evaluation.critique_summary if inv.critic_evaluation else "N/A",
+            diagnosis=inv.diagnosis,
+            patch_hash=req.patch_hash,
+            target_workspace=workspace_dir,
+            approver=principal.email,
+            approver_role=principal.role,
+            approval_timestamp=now,
+            test_result_summary=recovery_res.summary,
+            recovery_verified=recovery_res.all_checks_passed,
+            audit_tags=["live_lab", inv.failure_observed]
+        )
+        audit_store.record_investigation(audit_rec)
+
+        return {
+            "success": recovery_res.all_checks_passed,
+            "run_id": req.run_id,
+            "status": run_state["status"],
+            "applied_patch_hash": req.patch_hash,
+            "modified_files": apply_res.modified_files,
+            "recovery_result": recovery_res.model_dump(),
+            "approver": {
+                "email": principal.email,
+                "role": principal.role
+            }
         }
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        with _APPROVAL_LOCK:
+            run_state["status"] = "FAILED"
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Unexpected error during patch application: {str(e)}"
+        )
 
 
 @router.post("/patch/reject")
 def reject_candidate_patch(req: LiveRejectionRequest):
     """Records operator rejection of a candidate repair proposal."""
-    run_state = _ACTIVE_RUNS.get(req.run_id)
-    if not run_state:
-        raise HTTPException(status_code=404, detail="Run not found.")
+    with _APPROVAL_LOCK:
+        run_state = _ACTIVE_RUNS.get(req.run_id)
+        if not run_state:
+            raise HTTPException(status_code=404, detail="Run not found.")
 
-    workspace_dir = run_state["workspace_dir"]
-    workspace_mgr.cleanup(workspace_dir)
-    _ACTIVE_RUNS.pop(req.run_id, None)
+        current_status = run_state.get("status", "PENDING")
+        if current_status in ("APPLYING", "APPLIED", "VALIDATING", "VERIFIED"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot reject patch; approval or application is already in progress or completed (status: {current_status})."
+            )
+
+        run_state["status"] = "REJECTED"
+        workspace_dir = run_state["workspace_dir"]
+        workspace_mgr.cleanup(workspace_dir)
 
     return {
         "success": True,
+        "run_id": req.run_id,
+        "status": "REJECTED",
         "message": f"Patch proposal rejected for run {req.run_id}: {req.reason}"
     }
 

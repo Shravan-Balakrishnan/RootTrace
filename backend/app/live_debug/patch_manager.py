@@ -130,11 +130,47 @@ class PatchManager:
             if raw_path.startswith("live-lab/"):
                 raw_path = raw_path[9:]
 
+            # 1. Reject absolute paths immediately
+            if os.path.isabs(raw_path) or raw_path.startswith("/") or raw_path.startswith("\\") or (len(raw_path) > 1 and raw_path[1] == ":"):
+                raise ValueError(f"Absolute path rejected in patch: '{raw_path}'")
+
+            # 2. Reject path traversal sequences
+            if ".." in raw_path.replace("\\", "/").split("/"):
+                raise ValueError(f"Path traversal sequence rejected in patch: '{raw_path}'")
+
             target_file_path = os.path.join(workspace_dir, raw_path)
+
+            # 3. Reject symlink target
+            if os.path.islink(target_file_path):
+                raise ValueError(f"Symlink target file rejected in patch: '{raw_path}'")
+
+            # 4. Reject symlink parent directories up to workspace root
+            curr_parent = os.path.dirname(os.path.abspath(target_file_path))
+            ws_abs = os.path.abspath(workspace_dir)
+            while curr_parent.startswith(ws_abs) and curr_parent != ws_abs:
+                if os.path.islink(curr_parent):
+                    raise ValueError(f"Symlinked parent directory rejected in patch: '{raw_path}'")
+                curr_parent = os.path.dirname(curr_parent)
+
+            # 5. Strict canonical path containment check
             real_target = os.path.realpath(target_file_path)
             real_ws = os.path.realpath(workspace_dir)
-            if not real_target.startswith(real_ws):
+            try:
+                rel = os.path.relpath(real_target, real_ws)
+                if rel == "." or rel.startswith("..") or os.path.isabs(rel):
+                    raise ValueError(f"Target path '{raw_path}' escapes workspace directory.")
+            except ValueError:
                 raise ValueError(f"Target path '{raw_path}' escapes workspace directory.")
+
+            # 6. Protected files / secrets defense
+            normalized_rel = rel.replace("\\", "/").lower()
+            forbidden_patterns = [
+                ".env", "credentials", "id_rsa", "config.json", ".git",
+                "backend/", "frontend/", "tests/"
+            ]
+            for forbidden in forbidden_patterns:
+                if forbidden in normalized_rel or normalized_rel.startswith(forbidden):
+                    raise ValueError(f"Target path '{raw_path}' touches protected file/directory: '{forbidden}'")
 
             if not os.path.exists(target_file_path):
                 raise FileNotFoundError(f"Target file to patch does not exist: {raw_path}")
@@ -145,6 +181,13 @@ class PatchManager:
             new_content = self._patch_lines(original_content, fdiff[2:])
             with open(target_file_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(new_content) + "\n")
+
+            # 7. Post-application validation of the modified file
+            post_real_target = os.path.realpath(target_file_path)
+            if not post_real_target.startswith(real_ws):
+                raise ValueError(f"Post-patch validation failure: file '{raw_path}' escaped workspace.")
+            if os.path.islink(target_file_path):
+                raise ValueError(f"Post-patch validation failure: file '{raw_path}' became a symlink.")
 
             modified.append(raw_path)
 

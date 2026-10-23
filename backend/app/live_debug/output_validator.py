@@ -170,7 +170,8 @@ class OutputValidator:
             return False, f"Critic vetoed diagnosis due to contradiction: {contradictions[0]}"
 
         has_falsified = getattr(critic_eval, "has_falsified_leading_hypothesis", False)
-        if has_falsified:
+        is_valid = getattr(critic_eval, "is_valid_candidate", True)
+        if has_falsified or not is_valid:
             return False, "Critic explicitly falsified the leading hypothesis."
 
         return True, None

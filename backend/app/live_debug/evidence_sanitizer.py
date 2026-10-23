@@ -12,10 +12,21 @@ from pydantic import BaseModel, Field
 from .secret_scanner import SecretScanner, ScanResult
 from .input_guardrails import InputGuardrails, GuardrailInspectionResult
 
+import re
+
 logger = logging.getLogger("roottrace.live_debug.sanitizer")
+
+SENSITIVE_CONFIG_PATTERN = re.compile(
+    r"(?i)(?:^|[\\/])(?:\.env(?:\.[a-zA-Z0-9_-]+)?|.*credentials\.json|.*id_rsa|.*\.pem|.*service[-_]account.*\.json)$"
+)
+
+SAFE_ENV_DIAGNOSTIC_KEYS = {
+    "NODE_ENV", "APP_ENV", "ENVIRONMENT", "PYTHONPATH", "PORT", "LOG_LEVEL", "DEBUG"
+}
 
 
 class SanitizedEvidenceRecord(BaseModel):
+
     id: str
     source_tool: str
     timestamp: str
@@ -69,16 +80,53 @@ class EvidenceSanitizer:
             reliability = float(raw_record.get("reliability", 1.0))
             tags = list(raw_record.get("relevance_tags", []))
 
-            # 1. Redact secrets from metadata strings
+            # 1. Check for sensitive config files (.env, credentials.json, etc.) or raw environment dumps
+            is_sensitive_file = bool(SENSITIVE_CONFIG_PATTERN.search(source_ref))
+            is_env_dump = source_tool in ("env_dump", "environment", "env_vars", "os_environ")
+            
+            # Check if dict payload looks like an unrestricted environment dump
+            looks_like_env_dump = False
+            if isinstance(data, dict) and len(data) > 3:
+                env_like_keys = sum(1 for k in data.keys() if str(k).isupper() and "_" in str(k))
+                if env_like_keys >= 3:
+                    looks_like_env_dump = True
+
+            if is_sensitive_file or is_env_dump or looks_like_env_dump:
+                # Safely summarize: preserve safe diagnostic keys only, withhold everything else
+                safe_diagnostics = {}
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if str(k).upper() in SAFE_ENV_DIAGNOSTIC_KEYS:
+                            safe_diagnostics[str(k)] = str(v)
+
+                return SanitizedEvidenceRecord(
+                    id=ev_id,
+                    source_tool=source_tool,
+                    timestamp=timestamp,
+                    source_ref=self.scanner.scan_and_redact(source_ref).sanitized_text,
+                    summary=f"[SAFE SUMMARY: Sensitive configuration or environment collection withheld by guardrails]",
+                    data={
+                        "status": "SANITIZED_CONFIG",
+                        "notice": "Raw environment file or environment variable collection was withheld to protect secrets.",
+                        "safe_diagnostics": safe_diagnostics
+                    },
+                    reliability=0.5,
+                    relevance_tags=tags + ["sensitive_config_sanitized"],
+                    redaction_count=1,
+                    is_truncated=False,
+                    flagged_for_injection=False
+                )
+
+            # 2. Redact secrets from metadata strings
             ref_scan = self.scanner.scan_and_redact(source_ref)
             sum_scan = self.scanner.scan_and_redact(summary)
 
-            # 2. Redact secrets recursively from data payload
+            # 3. Redact secrets recursively from data payload
             sanitized_data, data_redactions, data_audits = self.scanner.sanitize_structure(data)
 
             total_redactions = ref_scan.redactions_count + sum_scan.redactions_count + data_redactions
 
-            # 3. Guardrail inspection for prompt injection
+            # 4. Guardrail inspection for prompt injection
             data_str = str(sanitized_data)
             bounded_text, is_trunc, violations = self.guardrails.inspect_and_bound_text(data_str, source_id=ev_id)
             has_injection = any(v.check_name == "PROMPT_INJECTION_FLAG" for v in violations)

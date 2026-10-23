@@ -139,14 +139,16 @@ class LiveInvestigationEngine:
             contradictions.append("Health check failed without application traceback or test assertion failure.")
 
         critic = CriticEvaluation(
-            leading_hypothesis_id=h1_id,
-            has_falsified_leading_hypothesis=len(contradictions) > 0,
+            hypothesis_id=h1_id,
+            temporal_order_valid=True,
             contradictions_found=contradictions,
             missing_evidence_found=["Direct source diff confirmation"] if not any(r.source_tool == "git_inspector" for r in collected.evidence_records) else [],
-            critique_summary="Leading hypothesis supported by captured test assertions and process logs." if not contradictions else "Evidence is ambiguous."
+            alternative_explanations=["Transient OS or network socket binding failure"],
+            critique_summary="Leading hypothesis supported by captured test assertions and process logs." if not contradictions else "Evidence is ambiguous.",
+            is_valid_candidate=(len(contradictions) == 0)
         )
 
-        trace.append(f"[{now}] Critic evaluation completed. Falsified: {critic.has_falsified_leading_hypothesis}")
+        trace.append(f"[{now}] Critic evaluation completed. Valid candidate: {critic.is_valid_candidate}")
 
         # If Critic vetoes, abstain
         is_critic_ok, veto_reason = OutputValidator.validate_critic_approval(critic)
@@ -204,15 +206,19 @@ class LiveInvestigationEngine:
             proposed_diff = (
                 "--- a/app/services.py\n"
                 "+++ b/app/services.py\n"
-                "@@ -35,3 +35,4 @@\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
                 "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
                 "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+                "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
             )
         elif "AssertionError" in error_context and "132.0" in error_context:
             proposed_diff = (
                 "--- a/app/services.py\n"
                 "+++ b/app/services.py\n"
-                "@@ -40,3 +40,3 @@\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
                 "-    final_total = round(discounted_subtotal, 2)\n"
                 "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
             )
@@ -221,7 +227,9 @@ class LiveInvestigationEngine:
             proposed_diff = (
                 "--- a/app/services.py\n"
                 "+++ b/app/services.py\n"
-                "@@ -40,3 +40,3 @@\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
                 "-    final_total = round(discounted_subtotal, 2)\n"
                 "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
             )
