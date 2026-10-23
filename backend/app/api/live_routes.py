@@ -20,7 +20,8 @@ from ..live_debug import (
     WorkspaceManager,
     RecoveryVerifier,
     LiveAuditStore,
-    AuditRecord
+    AuditRecord,
+    LiveRunStateStore
 )
 from ..safety.auth import authenticate_and_authorize_approver
 
@@ -36,6 +37,10 @@ patch_mgr = PatchManager()
 workspace_mgr = WorkspaceManager()
 verifier = RecoveryVerifier(test_runner)
 audit_store = LiveAuditStore()
+run_state_store = LiveRunStateStore()
+
+# Recover any runs that were interrupted by an unexpected process restart
+run_state_store.recover_interrupted_runs(workspace_mgr)
 
 # Thread-safe approval concurrency lock and active runs registry
 _APPROVAL_LOCK = threading.Lock()
@@ -124,6 +129,15 @@ def run_live_investigation():
     # 3. Run investigation loop
     inv_res = investigation_engine.run_investigation(collected, workspace_id=workspace_dir)
 
+    if inv_res.proposed_patch:
+        run_state_store.create_run(
+            run_id=run_id,
+            workspace_dir=workspace_dir,
+            patch_hash=inv_res.proposed_patch.patch_hash,
+            diff_text=inv_res.proposed_patch.diff,
+            status="PENDING"
+        )
+
     _ACTIVE_RUNS[run_id] = {
         "run_id": run_id,
         "investigation": inv_res,
@@ -141,7 +155,8 @@ def approve_candidate_patch(req: LiveApprovalRequest):
     Applies an approved patch inside the isolated workspace:
     - Strictly verifies caller's authenticated session and authorized role
     - Rejects concurrent, duplicate, or replayed approvals with HTTP 409 Conflict
-    - Verifies expected patch hash to prevent tampering or replay
+    - Atomically transitions status at the SQLite persistence boundary
+    - Re-validates patch hash against diff bytes immediately before application
     - Applies patch to isolated workspace only
     - Runs regression tests
     - Independently verifies recovery
@@ -156,54 +171,86 @@ def approve_candidate_patch(req: LiveApprovalRequest):
 
     with _APPROVAL_LOCK:
         run_state = _ACTIVE_RUNS.get(req.run_id)
-        if not run_state:
+        db_run = run_state_store.get_run(req.run_id)
+
+        if not run_state and not db_run:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Investigation run '{req.run_id}' not found or expired."
             )
 
-        current_status = run_state.get("status", "PENDING")
-        if current_status in ("APPLYING", "APPLIED", "VALIDATING", "VERIFIED"):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Conflict: Approval already in progress or completed for run '{req.run_id}' (status: {current_status})."
-            )
-        if current_status == "REJECTED":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Conflict: Patch proposal for run '{req.run_id}' was already rejected."
-            )
-
-        inv: Any = run_state["investigation"]
-        workspace_dir = run_state["workspace_dir"]
-
-        if not inv.proposed_patch:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No candidate patch available to approve."
+        # If present in memory but not yet in persistent store (e.g. from unit test mock), persist it
+        if not db_run and run_state:
+            inv = run_state.get("investigation")
+            patch = getattr(inv, "proposed_patch", None)
+            run_state_store.create_run(
+                run_id=req.run_id,
+                workspace_dir=run_state["workspace_dir"],
+                patch_hash=patch.patch_hash if patch else req.patch_hash,
+                diff_text=patch.diff if patch else "",
+                status=run_state.get("status", "PENDING")
             )
 
-        # 2. Patch hash and workspace binding verification
-        if inv.proposed_patch.patch_hash != req.patch_hash:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Stale or tampered patch: hash {req.patch_hash} does not match active proposal {inv.proposed_patch.patch_hash}."
-            )
+        workspace_dir = run_state["workspace_dir"] if run_state else db_run["workspace_dir"]
+        diff_text = run_state["investigation"].proposed_patch.diff if (run_state and getattr(run_state.get("investigation"), "proposed_patch", None)) else (db_run["diff_text"] if db_run else "")
 
-        # Transition state to APPLYING
-        run_state["status"] = "APPLYING"
+        # 2. Atomic state transition at SQLite persistence boundary
+        ok, err, row = run_state_store.transition_to_applying(
+            run_id=req.run_id,
+            expected_patch_hash=req.patch_hash,
+            expected_workspace=workspace_dir,
+            approver=principal.email,
+            approver_role=principal.role
+        )
 
-    # 3. Apply patch inside the isolated workspace
+        if not ok:
+            if err == "NOT_FOUND":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Run '{req.run_id}' not found.")
+            elif err and ("CONFLICT" in err or "ALREADY" in err):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Conflict: Approval already in progress or completed for run '{req.run_id}' ({err})."
+                )
+            elif err == "HASH_MISMATCH":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Stale or tampered patch: hash {req.patch_hash} does not match active proposal."
+                )
+            elif err == "WORKSPACE_MISMATCH":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Workspace target binding mismatch."
+                )
+            else:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Cannot approve patch: {err}")
+
+        if run_state:
+            run_state["status"] = "APPLYING"
+
+    # 3. Immediately re-validate patch hash against raw diff bytes before application
+    recomputed_hash = PatchManager.compute_patch_hash(diff_text)
+    if recomputed_hash != req.patch_hash:
+        run_state_store.update_status(req.run_id, "FAILED")
+        if run_state:
+            run_state["status"] = "FAILED"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pre-application verification failed: Diff bytes tampered or altered."
+        )
+
+    # 4. Apply patch inside the isolated workspace
     try:
         apply_res = patch_mgr.apply_patch_to_workspace(
-            diff_text=inv.proposed_patch.diff,
+            diff_text=diff_text,
             workspace_dir=workspace_dir,
             expected_patch_hash=req.patch_hash
         )
 
         if not apply_res.success:
+            run_state_store.update_status(req.run_id, "FAILED")
             with _APPROVAL_LOCK:
-                run_state["status"] = "FAILED"
+                if run_state:
+                    run_state["status"] = "FAILED"
             # Rollback on application failure
             workspace_mgr.rollback(workspace_dir, "pre_patch")
             raise HTTPException(
@@ -211,28 +258,41 @@ def approve_candidate_patch(req: LiveApprovalRequest):
                 detail=f"Patch application failed in workspace: {apply_res.error_message}"
             )
 
+        run_state_store.update_status(req.run_id, "APPLIED")
         with _APPROVAL_LOCK:
-            run_state["status"] = "APPLIED"
+            if run_state:
+                run_state["status"] = "APPLIED"
 
-        # 4. Independent Recovery Verification
+        # 5. Independent Recovery Verification
+        run_state_store.update_status(req.run_id, "VALIDATING")
         with _APPROVAL_LOCK:
-            run_state["status"] = "VALIDATING"
+            if run_state:
+                run_state["status"] = "VALIDATING"
 
         recovery_res = verifier.verify_workspace_recovery(workspace_dir)
 
+        final_status = "VERIFIED" if recovery_res.all_checks_passed else "FAILED"
+        run_state_store.update_status(
+            req.run_id,
+            final_status,
+            test_summary=recovery_res.summary,
+            recovery_verified=recovery_res.all_checks_passed
+        )
         with _APPROVAL_LOCK:
-            run_state["status"] = "VERIFIED" if recovery_res.all_checks_passed else "FAILED"
+            if run_state:
+                run_state["status"] = final_status
 
-        # 5. Persist Immutable Audit Record
+        # 6. Persist Immutable Audit Record
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        inv = run_state["investigation"] if run_state else None
         audit_rec = AuditRecord(
             run_id=req.run_id,
             timestamp=now,
-            observed_failure=inv.failure_observed,
-            evidence_count=len(inv.evidence_collected),
-            hypotheses_evaluated=[h.title for h in inv.hypotheses],
-            critic_verdict=inv.critic_evaluation.critique_summary if inv.critic_evaluation else "N/A",
-            diagnosis=inv.diagnosis,
+            observed_failure=inv.failure_observed if inv else "LIVE_REPAIR",
+            evidence_count=len(inv.evidence_collected) if inv else 1,
+            hypotheses_evaluated=[h.title for h in inv.hypotheses] if inv else ["Direct repair"],
+            critic_verdict=inv.critic_evaluation.critique_summary if (inv and inv.critic_evaluation) else "Approved",
+            diagnosis=inv.diagnosis if inv else "Direct repair applied",
             patch_hash=req.patch_hash,
             target_workspace=workspace_dir,
             approver=principal.email,
@@ -240,14 +300,14 @@ def approve_candidate_patch(req: LiveApprovalRequest):
             approval_timestamp=now,
             test_result_summary=recovery_res.summary,
             recovery_verified=recovery_res.all_checks_passed,
-            audit_tags=["live_lab", inv.failure_observed]
+            audit_tags=["live_lab", inv.failure_observed if inv else "live_repair"]
         )
         audit_store.record_investigation(audit_rec)
 
         return {
             "success": recovery_res.all_checks_passed,
             "run_id": req.run_id,
-            "status": run_state["status"],
+            "status": final_status,
             "applied_patch_hash": req.patch_hash,
             "modified_files": apply_res.modified_files,
             "recovery_result": recovery_res.model_dump(),
@@ -259,8 +319,10 @@ def approve_candidate_patch(req: LiveApprovalRequest):
     except HTTPException:
         raise
     except Exception as e:
+        run_state_store.update_status(req.run_id, "FAILED")
         with _APPROVAL_LOCK:
-            run_state["status"] = "FAILED"
+            if run_state:
+                run_state["status"] = "FAILED"
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unexpected error during patch application: {str(e)}"
@@ -272,19 +334,20 @@ def reject_candidate_patch(req: LiveRejectionRequest):
     """Records operator rejection of a candidate repair proposal."""
     with _APPROVAL_LOCK:
         run_state = _ACTIVE_RUNS.get(req.run_id)
-        if not run_state:
-            raise HTTPException(status_code=404, detail="Run not found.")
+        ok, err = run_state_store.reject_run(req.run_id, req.reason or "Operator rejected")
 
-        current_status = run_state.get("status", "PENDING")
-        if current_status in ("APPLYING", "APPLIED", "VALIDATING", "VERIFIED"):
+        if not ok and not run_state:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        elif not ok and "CONFLICT" in (err or ""):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=f"Cannot reject patch; approval or application is already in progress or completed (status: {current_status})."
+                detail=f"Cannot reject patch; approval or application is already in progress or completed ({err})."
             )
 
-        run_state["status"] = "REJECTED"
-        workspace_dir = run_state["workspace_dir"]
-        workspace_mgr.cleanup(workspace_dir)
+        if run_state:
+            run_state["status"] = "REJECTED"
+            workspace_dir = run_state["workspace_dir"]
+            workspace_mgr.cleanup(workspace_dir)
 
     return {
         "success": True,

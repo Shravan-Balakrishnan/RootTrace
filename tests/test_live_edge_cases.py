@@ -267,33 +267,41 @@ def test_edge_case_stale_or_tampered_patch_hash_rejection(tmp_path):
 
 # --- 12. Concurrent Duplicate Approval Requests (HTTP 409 Conflict) ---
 def test_edge_case_concurrent_duplicate_approval_409(isolated_workspace):
-    # Setup active run in _ACTIVE_RUNS
-    run_id = "run_concurrency_test_01"
+    from types import SimpleNamespace
+    import uuid
+    from backend.app.api.live_routes import run_state_store
+
+    # Setup unique run in _ACTIVE_RUNS and run_state_store
+    run_id = f"run_concurrency_{uuid.uuid4().hex[:6]}"
     session = create_authenticated_session("lead_sre@company.com", "LeadSRE-Prod-Auth-2026!")
 
-    class MockProposal:
-        diff = (
-            "--- a/app/services.py\n"
-            "+++ b/app/services.py\n"
-            "@@ -58,4 +58,4 @@\n"
-            "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
-            "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
-            "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
-            "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
-        )
-        patch_hash = PatchManager.compute_patch_hash(diff)
+    diff = (
+        "--- a/app/services.py\n"
+        "+++ b/app/services.py\n"
+        "@@ -58,4 +58,4 @@\n"
+        "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+        "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
+        "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+        "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
+    )
+    p_hash = PatchManager.compute_patch_hash(diff)
 
-    class MockInv:
-        proposed_patch = MockProposal()
-        failure_observed = "TEST_FAILURE"
-        evidence_collected = []
-        hypotheses = []
-        critic_evaluation = None
-        diagnosis = "Mock diagnosis"
+    proposal = SimpleNamespace(diff=diff, patch_hash=p_hash)
+    inv = SimpleNamespace(
+        proposed_patch=proposal,
+        failure_observed="TEST_FAILURE",
+        evidence_collected=[],
+        hypotheses=[],
+        critic_evaluation=None,
+        diagnosis="Mock diagnosis"
+    )
+
+    # Persist in run_state_store as already APPLYING
+    run_state_store.create_run(run_id, str(isolated_workspace), p_hash, diff, "APPLYING")
 
     _ACTIVE_RUNS[run_id] = {
         "run_id": run_id,
-        "investigation": MockInv(),
+        "investigation": inv,
         "workspace_dir": str(isolated_workspace),
         "status": "APPLYING",  # Already in APPLYING status
         "created_at": "2026-10-23T22:00:00Z"
@@ -301,7 +309,7 @@ def test_edge_case_concurrent_duplicate_approval_409(isolated_workspace):
 
     req = LiveApprovalRequest(
         run_id=run_id,
-        patch_hash=MockProposal.patch_hash,
+        patch_hash=p_hash,
         auth_token=session.token,
         approver="lead_sre@company.com",
         role="lead_sre"
@@ -364,3 +372,227 @@ def test_edge_case_sample_app_crash_roottrace_stable():
     assert "is_running" in status
     assert "port" in status
     assert status["port"] == 8001
+
+
+# --- 16. Adversarial: Approval After Rejection Rejection (HTTP 409) ---
+def test_adversarial_approval_after_rejection_rejected_409(isolated_workspace):
+    from backend.app.api.live_routes import _ACTIVE_RUNS, run_state_store, reject_candidate_patch, approve_candidate_patch, LiveApprovalRequest, LiveRejectionRequest
+    from backend.app.safety.auth import create_authenticated_session
+
+    run_id = "run_adv_reject_then_approve"
+    session = create_authenticated_session("lead_sre@company.com", "LeadSRE-Prod-Auth-2026!")
+
+    class MockProposal:
+        diff = "--- a/app/services.py\n+++ b/app/services.py\n@@ -1,1 +1,1 @@\n-a\n+b\n"
+        patch_hash = PatchManager.compute_patch_hash(diff)
+
+    class MockInv:
+        proposed_patch = MockProposal()
+        failure_observed = "TEST_FAILURE"
+        evidence_collected = []
+        hypotheses = []
+        critic_evaluation = None
+        diagnosis = "Mock diagnosis"
+
+    _ACTIVE_RUNS[run_id] = {
+        "run_id": run_id,
+        "investigation": MockInv(),
+        "workspace_dir": str(isolated_workspace),
+        "status": "PENDING",
+        "created_at": "2026-10-23T22:00:00Z"
+    }
+    run_state_store.create_run(run_id, str(isolated_workspace), MockProposal.patch_hash, MockProposal.diff, "PENDING")
+
+    # First reject
+    rej_req = LiveRejectionRequest(run_id=run_id, reason="Operator vetoed")
+    rej_res = reject_candidate_patch(rej_req)
+    assert rej_res["status"] == "REJECTED"
+
+    # Attempt to approve after rejection
+    app_req = LiveApprovalRequest(
+        run_id=run_id,
+        patch_hash=MockProposal.patch_hash,
+        auth_token=session.token,
+        approver="lead_sre@company.com",
+        role="lead_sre"
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        approve_candidate_patch(app_req)
+    assert exc_info.value.status_code == 409
+    assert "Conflict" in exc_info.value.detail or "REJECTED" in exc_info.value.detail
+
+
+# --- 17. Adversarial: Approval Replay After Successful Verification (HTTP 409) ---
+def test_adversarial_approval_replay_after_successful_verification_409(isolated_workspace):
+    from backend.app.api.live_routes import _ACTIVE_RUNS, run_state_store, approve_candidate_patch, LiveApprovalRequest
+    from backend.app.safety.auth import create_authenticated_session
+    from types import SimpleNamespace
+    import uuid
+
+    run_id = f"run_adv_replay_{uuid.uuid4().hex[:6]}"
+    session = create_authenticated_session("lead_sre@company.com", "LeadSRE-Prod-Auth-2026!")
+
+    diff = (
+        "--- a/app/services.py\n"
+        "+++ b/app/services.py\n"
+        "@@ -58,4 +58,4 @@\n"
+        "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+        "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
+        "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+        "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
+    )
+    p_hash = PatchManager.compute_patch_hash(diff)
+
+    proposal = SimpleNamespace(diff=diff, patch_hash=p_hash)
+    inv = SimpleNamespace(
+        proposed_patch=proposal,
+        failure_observed="TEST_FAILURE",
+        evidence_collected=[],
+        hypotheses=[],
+        critic_evaluation=None,
+        diagnosis="Mock diagnosis"
+    )
+
+    run_state_store.create_run(run_id, str(isolated_workspace), p_hash, diff, "VERIFIED")
+    _ACTIVE_RUNS[run_id] = {
+        "run_id": run_id,
+        "investigation": inv,
+        "workspace_dir": str(isolated_workspace),
+        "status": "VERIFIED",
+        "created_at": "2026-10-23T22:00:00Z"
+    }
+
+    req = LiveApprovalRequest(
+        run_id=run_id,
+        patch_hash=p_hash,
+        auth_token=session.token,
+        approver="lead_sre@company.com",
+        role="lead_sre"
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        approve_candidate_patch(req)
+    assert exc_info.value.status_code == 409
+    assert "Conflict" in exc_info.value.detail
+
+
+# --- 18. Adversarial: Interrupted Process Recovery ---
+def test_adversarial_process_interruption_recovery(tmp_path):
+    from backend.app.live_debug.run_state_store import LiveRunStateStore
+    from backend.app.live_debug.workspace_manager import WorkspaceManager
+
+    store = LiveRunStateStore()
+    ws_mgr = WorkspaceManager()
+    ws = tmp_path / "interrupted_ws"
+    ws.mkdir()
+    f = ws / "test.py"
+    f.write_text("orig = 1\n", encoding="utf-8")
+    ws_mgr.create_snapshot(str(ws), "pre_patch")
+    f.write_text("corrupted_during_patch = 2\n", encoding="utf-8")
+
+    run_id = "run_interrupted_001"
+    store.create_run(run_id, str(ws), "hash123", "diff123", "APPLYING")
+
+    # Simulate process restart recovery
+    recovered_count = store.recover_interrupted_runs(ws_mgr)
+    assert recovered_count >= 1
+
+    run = store.get_run(run_id)
+    assert run["status"] == "INTERRUPTED"
+    assert "orig = 1" in f.read_text(encoding="utf-8")
+
+
+# --- 19. Behavioral Regression: Green Health but Defective Calculation ---
+def test_behavioral_defect_healthy_process_end_to_end(tmp_path):
+    """
+    Validates that RootTrace detects, diagnoses, and repairs a genuine behavioral defect
+    even when the application process is running and /health probe remains green.
+    """
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    live_lab_src = os.path.join(repo_root, "live-lab")
+    testbed = tmp_path / "behavioral_testbed"
+    shutil.copytree(live_lab_src, str(testbed))
+
+    # 1. Baseline tests pass
+    runner = LiveDebugTestRunner(timeout_seconds=12.0)
+    baseline_res = runner.run_tests(target_dir=str(testbed))
+    assert baseline_res.all_passed is True
+
+    # 2. Introduce silent calculation defect: omit tax from final_total
+    services_path = testbed / "app" / "services.py"
+    code = services_path.read_text(encoding="utf-8")
+    defective_code = code.replace(
+        "final_total = round(discounted_subtotal + tax_amount, 2)",
+        "final_total = round(discounted_subtotal, 2)"
+    )
+    assert defective_code != code
+    services_path.write_text(defective_code, encoding="utf-8")
+
+    # 3. Simulate health check is GREEN HTTP 200, but regression tests fail on calculation assertion
+    failing_test_res = runner.run_tests(target_dir=str(testbed))
+    assert failing_test_res.all_passed is False
+    assert failing_test_res.failed_tests > 0
+    assert "132.0" in failing_test_res.raw_output or "120.0" in failing_test_res.raw_output
+
+    # 4. Evidence collection
+    evidence_items = [
+        {
+            "id": "ev_health_probe",
+            "source_tool": "health_probe",
+            "source_ref": "http://127.0.0.1:8001/health",
+            "summary": "Health status: HEALTHY (HTTP 200), process alive",
+            "data": {"status": "HEALTHY", "http_status": 200, "is_healthy": True}
+        },
+        {
+            "id": "ev_test_failure",
+            "source_tool": "regression_test_runner",
+            "source_ref": "live-lab/tests/test_api.py",
+            "summary": "Order calculation test assertion failed (132.0 != 120.0)",
+            "data": failing_test_res.model_dump()
+        }
+    ]
+    sanitizer = EvidenceSanitizer()
+    sanitized, summary = sanitizer.sanitize_evidence_collection(evidence_items)
+
+    collected = CollectedLiveEvidence(
+        run_id="run_behavioral_001",
+        observed_failure_type="TEST_FAILURE",
+        evidence_records=sanitized,
+        sanitization_summary=summary,
+        is_failing=True,
+        summary="Behavioral failure: Regression test assertions failed despite green health probe."
+    )
+
+    # 5. RootTrace investigation does NOT mistake healthy process status for overall health
+    engine = LiveInvestigationEngine()
+    inv_res = engine.run_investigation(collected, workspace_id=str(testbed))
+    assert inv_res.abstained is False
+    assert inv_res.proposed_patch is not None
+    assert "final_total = round(discounted_subtotal + tax_amount, 2)" in inv_res.proposed_patch.diff
+
+    # 6. Apply patch and verify recovery
+    patch_mgr = PatchManager()
+    apply_res = patch_mgr.apply_patch_to_workspace(
+        diff_text=inv_res.proposed_patch.diff,
+        workspace_dir=str(testbed),
+        expected_patch_hash=inv_res.proposed_patch.patch_hash
+    )
+    assert apply_res.success is True
+
+    # 7. Regression tests re-run and pass completely
+    post_res = runner.run_tests(target_dir=str(testbed))
+    assert post_res.all_passed is True
+
+    # 8. Negative test: A fully healthy application must result in explicit abstention without fabricated patches
+    healthy_bundle = CollectedLiveEvidence(
+        run_id="run_behavioral_clean",
+        observed_failure_type="NO_FAILURE",
+        evidence_records=sanitized,
+        sanitization_summary=summary,
+        is_failing=False,
+        summary="Application and tests are completely healthy."
+    )
+    clean_res = engine.run_investigation(healthy_bundle, workspace_id=str(testbed))
+    assert clean_res.abstained is True
+    assert clean_res.proposed_patch is None
+    assert clean_res.phase == "RESOLVED"
+
