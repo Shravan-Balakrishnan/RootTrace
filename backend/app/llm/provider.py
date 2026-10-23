@@ -25,6 +25,7 @@ logger = logging.getLogger("roottrace.llm")
 
 # Explicit Allowlist of Investigative Tools
 ALLOWED_TOOLS: Set[str] = {
+    "query_logs",
     "get_logs",
     "inspect_database",
     "get_payment_status",
@@ -85,18 +86,31 @@ class LLMConfig(BaseModel):
 
 class LLMProvider:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-        self.configured_provider = "openai" if os.getenv("OPENAI_API_KEY") else ("gemini" if os.getenv("GEMINI_API_KEY") else "deterministic")
-        
-        # Accurate 4-state lifecycle: 'deterministic' | 'cloud_configured' | 'cloud_ready' | 'cloud_error'
-        if not self.api_key:
-            self.state = "deterministic"
-        else:
-            self.state = "cloud_configured"
+        openai_key = os.getenv("OPENAI_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
 
-        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini") if self.configured_provider == "openai" else (
-            "gemini-2.5-flash" if self.configured_provider == "gemini" else "deterministic-reasoner-v1"
-        )
+        if openai_key:
+            self.api_key = openai_key
+            self.configured_provider = "openai"
+            self.state = "cloud_configured"
+            model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            self.last_error = None
+        elif gemini_key or anthropic_key:
+            # Explicitly declare unsupported in Phase 1 and fall back to deterministic mode
+            unsupported = "Gemini" if gemini_key else "Anthropic"
+            self.api_key = None
+            self.configured_provider = "deterministic"
+            self.state = "deterministic"
+            self.last_error = f"{unsupported} provider configured but not supported in Phase 1 (OpenAI only). Falling back to deterministic reasoning."
+            logger.warning(self.last_error)
+            model_name = "deterministic-reasoner-v1"
+        else:
+            self.api_key = None
+            self.configured_provider = "deterministic"
+            self.state = "deterministic"
+            self.last_error = None
+            model_name = "deterministic-reasoner-v1"
 
         self.config = LLMConfig(
             provider=self.configured_provider,
@@ -104,7 +118,6 @@ class LLMProvider:
             api_key_configured=bool(self.api_key),
             timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "15.0"))
         )
-        self.last_error: Optional[str] = None
         self._client = None
         self._init_client()
 
@@ -139,14 +152,20 @@ class LLMProvider:
     def get_status(self) -> Dict[str, Any]:
         """
         Report accurate provider status without leaking secrets.
-        States: 'deterministic', 'cloud_configured', 'cloud_ready', 'cloud_error'.
+        Accurately distinguishes:
+        - 'deterministic': No cloud credentials configured; local reasoning active.
+        - 'cloud_configured': Credentials configured, but connectivity not yet confirmed via successful request.
+        - 'cloud_ready': Real model request succeeded and confirmed active.
+        - 'cloud_error': Configured provider failed, timed out, or threw an error.
         """
+        is_connected = (self.state == "cloud_ready")
         return {
             "provider": self.config.provider,
             "model_name": self.config.model_name,
             "api_key_configured": self.config.api_key_configured,
             "state": self.state,
-            "mode": "CLOUD_AI" if self.state in ("cloud_configured", "cloud_ready") else "DETERMINISTIC_REASONING_ENGINE",
+            "connected": is_connected,
+            "mode": "CLOUD_AI" if is_connected else "DETERMINISTIC_REASONING_ENGINE",
             "last_error": self.last_error
         }
 
@@ -427,12 +446,16 @@ class LLMProvider:
         if ("historical" in all_needed or "lock" in all_needed or "incident" in all_needed) and "search_historical_incidents" not in invoked_tools:
             candidates.append(("search_historical_incidents", {"query": "lock"}))
 
+        if ("log" in all_needed or "error" in all_needed or "exception" in all_needed) and ("query_logs" not in invoked_tools and "get_logs" not in invoked_tools):
+            candidates.append(("query_logs", {"limit": 50}))
+
         if candidates:
             tool_name, args = candidates[0]
             return {"tool_name": tool_name, "arguments": args}
 
         # Fallback pool for un-invoked tools
         fallback_pool = [
+            ("query_logs", {"limit": 50}),
             ("get_git_changes", {}),
             ("check_deployments", {}),
             ("get_trace", {}),

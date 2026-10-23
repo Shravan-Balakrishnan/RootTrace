@@ -19,7 +19,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onApprove,
   onReject
 }) => {
-  const [approver, setApprover] = useState('incident_lead@corp.internal');
+  const [approver, setApprover] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!proposal) return null;
@@ -27,9 +27,10 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   const isAwaitingApproval = currentPhase === 'AWAITING_APPROVAL';
 
   const handleApprove = async () => {
+    if (!approver.trim()) return;
     setIsSubmitting(true);
     try {
-      await onApprove(approver, "Operator authorized rollback and callback replay in simulator");
+      await onApprove(approver.trim(), "Operator authorized rollback and callback replay in simulator");
     } finally {
       setIsSubmitting(false);
     }
@@ -92,6 +93,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
               type="text"
               value={approver}
               onChange={(e) => setApprover(e.target.value)}
+              placeholder="e.g. lead_sre@company.com (required)"
               style={{
                 flex: 1,
                 background: '#090d16',
@@ -108,26 +110,26 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               onClick={handleApprove}
-              disabled={isSubmitting}
+              disabled={isSubmitting || !approver.trim()}
               style={{
                 flex: 1,
-                background: 'linear-gradient(135deg, #10b981, #059669)',
-                color: '#fff',
+                background: (isSubmitting || !approver.trim()) ? '#334155' : 'linear-gradient(135deg, #10b981, #059669)',
+                color: (isSubmitting || !approver.trim()) ? '#94a3b8' : '#fff',
                 border: 'none',
                 padding: '8px 14px',
                 borderRadius: '6px',
                 fontSize: '12px',
                 fontWeight: 600,
-                cursor: isSubmitting ? 'not-allowed' : 'pointer',
+                cursor: (isSubmitting || !approver.trim()) ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '6px',
-                boxShadow: '0 0 12px rgba(16, 185, 129, 0.3)'
+                boxShadow: (isSubmitting || !approver.trim()) ? 'none' : '0 0 12px rgba(16, 185, 129, 0.3)'
               }}
             >
               <CheckCircle2 size={14} />
-              {isSubmitting ? 'Executing in Simulator...' : 'Approve & Execute Remediation'}
+              {isSubmitting ? 'Executing in Simulator...' : (!approver.trim() ? 'Enter Approver Identity to Authorize' : 'Approve & Execute Remediation')}
             </button>
 
             <button

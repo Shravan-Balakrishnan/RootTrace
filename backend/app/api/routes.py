@@ -18,8 +18,8 @@ class ScenarioSelectRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    approver: str = "sre_incident_lead@company.com"
-    comment: Optional[str] = "Approved rollback and dead-letter replay."
+    approver: str
+    comment: Optional[str] = None
 
 
 class ToolInvocationRequest(BaseModel):
@@ -164,9 +164,26 @@ def run_investigation():
 
 @router.post("/investigate/tool")
 def invoke_tool(req: ToolInvocationRequest):
+    from ..llm.provider import ALLOWED_TOOLS
+    import inspect
+
+    # Restrict strictly to explicit allowlist of read-only investigative tools
+    if req.tool_name not in ALLOWED_TOOLS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tool '{req.tool_name}' is not in the allowed investigative tools set. Permitted tools: {sorted(list(ALLOWED_TOOLS))}"
+        )
+
     tool_fn = getattr(orchestrator.tools, req.tool_name, None)
-    if not tool_fn:
-        raise HTTPException(status_code=400, detail=f"Tool '{req.tool_name}' does not exist.")
+    if not tool_fn or not callable(tool_fn) or req.tool_name.startswith("_"):
+        raise HTTPException(status_code=400, detail=f"Tool '{req.tool_name}' is not executable.")
+
+    # Validate arguments against the tool callable signature before executing
+    try:
+        sig = inspect.signature(tool_fn)
+        sig.bind(**req.arguments)
+    except TypeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid arguments for tool '{req.tool_name}': {str(e)}")
 
     res = tool_fn(**req.arguments)
     # Sync new evidence

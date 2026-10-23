@@ -68,6 +68,9 @@ class ToolRegistry:
             self._record_call("query_logs", {"service": service, "level": level, "limit": limit}, [], error=str(e), duration_ms=(time.time() - t0) * 1000)
             return {"success": False, "error": str(e), "evidence_ids": []}
 
+    # Alias for compatibility with get_logs references
+    get_logs = query_logs
+
     def inspect_database(self, table: Optional[str] = None) -> Dict[str, Any]:
         """Inspect database tables, order statuses, row lock contention, and load metrics."""
         t0 = time.time()

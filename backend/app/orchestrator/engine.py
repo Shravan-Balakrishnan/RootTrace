@@ -290,7 +290,7 @@ class Orchestrator:
                 explanation="Leading candidate lacks sufficient decisive evidence to meet verified threshold."
             )
 
-    def approve_remediation(self, approver: str = "oncall_engineer@company.com", comment: Optional[str] = None):
+    def approve_remediation(self, approver: str, comment: Optional[str] = None):
         """Operator explicitly approves remediation"""
         if not approver or not approver.strip():
             raise ValueError("An explicit approver identity is required.")

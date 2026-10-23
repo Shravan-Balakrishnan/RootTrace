@@ -20,9 +20,44 @@ def test_provider_status_with_key_untested():
         provider = LLMProvider()
         status = provider.get_status()
         assert status["state"] == "cloud_configured"
+        assert status["connected"] is False
+        assert status["mode"] == "DETERMINISTIC_REASONING_ENGINE"
         assert status["api_key_configured"] is True
         # Ensure no secrets leak
         assert "sk-fake" not in str(status)
+
+
+def test_tool_name_aliases_get_logs_and_query_logs():
+    from backend.app.tools.investigation import ToolRegistry
+    from backend.app.sandbox.engine import SimulatedEnvironment
+    registry = ToolRegistry(SimulatedEnvironment("callback_race"))
+    # Both query_logs and get_logs must exist and be callable
+    assert hasattr(registry, "query_logs")
+    assert hasattr(registry, "get_logs")
+    res1 = registry.query_logs(limit=5)
+    assert res1["success"] is True
+    res2 = registry.get_logs(limit=5)
+    assert res2["success"] is True
+
+
+def test_all_allowlisted_tools_exist_and_are_callable():
+    from backend.app.tools.investigation import ToolRegistry
+    from backend.app.sandbox.engine import SimulatedEnvironment
+    registry = ToolRegistry(SimulatedEnvironment("callback_race"))
+    for tool_name in ALLOWED_TOOLS:
+        assert hasattr(registry, tool_name), f"Tool '{tool_name}' in ALLOWED_TOOLS missing on ToolRegistry"
+        assert callable(getattr(registry, tool_name)), f"Tool '{tool_name}' on ToolRegistry is not callable"
+
+
+def test_unsupported_provider_fallback():
+    # Configuring Gemini or Anthropic in Phase 1 falls back to deterministic mode with explicit notice
+    with patch.dict(os.environ, {"GEMINI_API_KEY": "fake_gemini_key", "OPENAI_API_KEY": ""}, clear=True):
+        provider = LLMProvider()
+        status = provider.get_status()
+        assert status["state"] == "deterministic"
+        assert status["mode"] == "DETERMINISTIC_REASONING_ENGINE"
+        assert "Gemini" in status["last_error"]
+        assert "not supported in Phase 1" in status["last_error"]
 
 
 def test_hypothesis_generation_grounding():
@@ -96,6 +131,8 @@ def test_mocked_cloud_llm_success():
         assert hypotheses[0].title == "Mock AI Concurrency Conflict"
         assert provider.state == "cloud_ready"
         assert provider.get_status()["state"] == "cloud_ready"
+        assert provider.get_status()["connected"] is True
+        assert provider.get_status()["mode"] == "CLOUD_AI"
 
 
 def test_mocked_cloud_llm_failure_safely_falls_back():

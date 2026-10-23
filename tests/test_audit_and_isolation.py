@@ -49,6 +49,14 @@ def test_api_remediation_approval_workflow(client):
     r_reject = client.post("/api/remediation/reject")
     assert r_reject.status_code == 200
 
+    # Missing approver must fail validation (HTTP 422)
+    r_missing = client.post("/api/remediation/approve", json={})
+    assert r_missing.status_code == 422
+
+    # Blank approver must fail validation (HTTP 400)
+    r_blank = client.post("/api/remediation/approve", json={"approver": "   "})
+    assert r_blank.status_code == 400
+
     # Explicit approval
     r_approve = client.post("/api/remediation/approve", json={
         "approver": "lead_sre@company.com",
@@ -110,3 +118,31 @@ def test_sse_stream_events_delivery(client):
         # Every event must carry a consistent run_id
         run_ids = {e["incident"]["run_id"] for e in events if "incident" in e and "run_id" in e["incident"]}
         assert len(run_ids) == 1
+
+
+def test_invoke_tool_allowlist_enforcement(client):
+    # Attempting to invoke a non-allowlisted tool or arbitrary function must be rejected
+    r1 = client.post("/api/investigate/tool", json={"tool_name": "execute_remediation", "arguments": {}})
+    assert r1.status_code == 400
+    assert "not in the allowed investigative tools set" in r1.json()["detail"]
+
+    r2 = client.post("/api/investigate/tool", json={"tool_name": "_record_call", "arguments": {}})
+    assert r2.status_code == 400
+
+
+def test_invoke_tool_argument_validation(client):
+    # Calling an allowed tool with invalid/unexpected arguments must return 400
+    r = client.post("/api/investigate/tool", json={
+        "tool_name": "get_payment_status",
+        "arguments": {"invalid_param_foo": 123}
+    })
+    assert r.status_code == 400
+    assert "Invalid arguments for tool" in r.json()["detail"]
+
+    # Calling with valid arguments must succeed
+    r_valid = client.post("/api/investigate/tool", json={
+        "tool_name": "get_payment_status",
+        "arguments": {"order_id": "ord_1001"}
+    })
+    assert r_valid.status_code == 200
+    assert r_valid.json()["result"]["success"] is True
