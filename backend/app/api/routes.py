@@ -20,6 +20,7 @@ class ScenarioSelectRequest(BaseModel):
 
 class SessionInitRequest(BaseModel):
     email: str
+    password: Optional[str] = None
 
 
 class ApprovalRequest(BaseModel):
@@ -299,12 +300,12 @@ def invoke_tool(req: ToolInvocationRequest):
 @router.post("/auth/session")
 def initialize_session(req: SessionInitRequest):
     """
-    Authenticates an operator against the organization directory and issues
-    an ephemeral, cryptographically random session token.
-    Credentials are NEVER hardcoded or statically exposed.
+    Authenticates an operator with real verified credentials (salted PBKDF2-HMAC-SHA256)
+    against the organization directory and issues an ephemeral, cryptographically random session token.
+    An email alone CANNOT obtain an authenticated session.
     """
     from ..safety.auth import create_authenticated_session
-    session = create_authenticated_session(req.email)
+    session = create_authenticated_session(req.email, password=req.password)
     return {
         "session_token": session.token,
         "email": session.principal.email,

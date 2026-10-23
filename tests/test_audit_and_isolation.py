@@ -53,8 +53,11 @@ def test_api_remediation_approval_workflow(client):
     r_missing = client.post("/api/remediation/approve", json={})
     assert r_missing.status_code == 401
 
-    # Create dynamic session for lead SRE
-    sess_res = client.post("/api/auth/session", json={"email": "lead_sre@company.com"})
+    # Create dynamic session for lead SRE with verified credentials
+    sess_res = client.post("/api/auth/session", json={
+        "email": "lead_sre@company.com",
+        "password": "LeadSRE-Prod-Auth-2026!"
+    })
     assert sess_res.status_code == 200
     lead_token = sess_res.json()["session_token"]
     assert len(lead_token) >= 32  # Cryptographically random token
@@ -200,13 +203,17 @@ def test_approver_whitespace_rejection(client):
     client.post("/api/scenarios/select", json={"scenario_id": "callback_race"})
     client.post("/api/investigate/run")
 
-    # Whitespace-only approver must be rejected
-    r_space = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "   "})
-    assert r_space.status_code in [400, 422]
+    # Create dynamic session for lead SRE with verified credentials
+    lead_sess_res = client.post("/api/auth/session", json={
+        "email": "lead_sre@company.com",
+        "password": "LeadSRE-Prod-Auth-2026!"
+    })
+    assert lead_sess_res.status_code == 200
+    lead_token = lead_sess_res.json()["session_token"]
 
-    # Create dynamic session for lead SRE
-    lead_sess = client.post("/api/auth/session", json={"email": "lead_sre@company.com"}).json()
-    lead_token = lead_sess["session_token"]
+    # Whitespace-only approver must be rejected
+    r_space = client.post("/api/remediation/approve", json={"auth_token": lead_token, "approver": "   "})
+    assert r_space.status_code in [400, 422]
 
     # Too short / invalid chars
     r_short = client.post("/api/remediation/approve", json={"auth_token": lead_token, "approver": "a"})
@@ -227,7 +234,10 @@ def test_approver_role_authorization_enforcement(client):
     assert r_fake_token.status_code == 401
 
     # Dynamic session for unauthorized role (intern) -> HTTP 403 Forbidden
-    intern_sess = client.post("/api/auth/session", json={"email": "intern_observer@company.com"}).json()
+    intern_sess = client.post("/api/auth/session", json={
+        "email": "intern_observer@company.com",
+        "password": "Intern-Guest-2026!"
+    }).json()
     intern_token = intern_sess["session_token"]
 
     r_unauth = client.post("/api/remediation/approve", json={
@@ -237,7 +247,10 @@ def test_approver_role_authorization_enforcement(client):
     assert "is not authorized to approve" in r_unauth.json()["detail"]
 
     # Role spoofing prevention: Client claims role="principal_sre" while using an oncall session -> HTTP 403 Forbidden
-    oncall_sess = client.post("/api/auth/session", json={"email": "oncall_sre@company.com"}).json()
+    oncall_sess = client.post("/api/auth/session", json={
+        "email": "oncall_sre@company.com",
+        "password": "OnCall-Incident-2026!"
+    }).json()
     oncall_token = oncall_sess["session_token"]
 
     r_spoof = client.post("/api/remediation/approve", json={
@@ -248,7 +261,10 @@ def test_approver_role_authorization_enforcement(client):
     assert "Role mismatch" in r_spoof.json()["detail"]
 
     # Identity spoofing prevention: Client claims to be lead_sre while using commander session -> HTTP 403 Forbidden
-    cmd_sess = client.post("/api/auth/session", json={"email": "incident_commander@company.com"}).json()
+    cmd_sess = client.post("/api/auth/session", json={
+        "email": "incident_commander@company.com",
+        "password": "Commander-SecOps-2026!"
+    }).json()
     cmd_token = cmd_sess["session_token"]
 
     r_id_spoof = client.post("/api/remediation/approve", json={
@@ -273,11 +289,17 @@ def test_approver_role_authorization_enforcement(client):
 
 def test_auth_session_creation_and_profile(client):
     # 1. Unknown user fails to create session
-    r_bad_user = client.post("/api/auth/session", json={"email": "unknown_hacker@domain.com"})
+    r_bad_user = client.post("/api/auth/session", json={
+        "email": "unknown_hacker@domain.com",
+        "password": "AnyPassword123!"
+    })
     assert r_bad_user.status_code == 401
 
-    # 2. Known user obtains random, ephemeral session token
-    r_sess = client.post("/api/auth/session", json={"email": "staff_sre@company.com"})
+    # 2. Known user obtains random, ephemeral session token with verified password
+    r_sess = client.post("/api/auth/session", json={
+        "email": "staff_sre@company.com",
+        "password": "StaffSRE-Recovery-2026!"
+    })
     assert r_sess.status_code == 200
     data = r_sess.json()
     assert "session_token" in data
@@ -293,3 +315,67 @@ def test_auth_session_creation_and_profile(client):
     assert me["role"] == "staff_sre"
     assert "token" not in me
     assert "session_token" not in me
+
+
+def test_regression_unauthenticated_caller_cannot_obtain_session(client):
+    """
+    Regression Test:
+    Proves that an email alone, missing password, blank password, or wrong password
+    cannot obtain an authenticated session or access privileged approval flows.
+    """
+    # 1. Email alone (no password provided) -> 401 Unauthorized
+    r_email_only = client.post("/api/auth/session", json={"email": "lead_sre@company.com"})
+    assert r_email_only.status_code == 401
+    assert "Password credential is required" in r_email_only.json()["detail"]
+
+    # 2. Empty string or whitespace password -> 401 Unauthorized
+    r_blank_pwd = client.post("/api/auth/session", json={
+        "email": "lead_sre@company.com",
+        "password": "   "
+    })
+    assert r_blank_pwd.status_code == 401
+    assert "Password credential is required" in r_blank_pwd.json()["detail"]
+
+    # 3. Incorrect password -> 401 Unauthorized
+    r_wrong_pwd = client.post("/api/auth/session", json={
+        "email": "lead_sre@company.com",
+        "password": "WrongPassword123!"
+    })
+    assert r_wrong_pwd.status_code == 401
+    assert "Invalid email or password credentials" in r_wrong_pwd.json()["detail"]
+
+    # 4. Unknown email with arbitrary password -> 401 Unauthorized
+    r_unknown = client.post("/api/auth/session", json={
+        "email": "impostor@attacker.org",
+        "password": "SomePassword"
+    })
+    assert r_unknown.status_code == 401
+    assert "Invalid email or password credentials" in r_unknown.json()["detail"]
+
+
+def test_persistent_shared_session_storage(client):
+    """
+    Verifies that sessions are stored in the persistent shared SQLite database
+    and can be queried / verified across independent worker database connections.
+    """
+    import sqlite3
+    from backend.app.safety.auth import DB_PATH
+
+    # Issue an authenticated session
+    r = client.post("/api/auth/session", json={
+        "email": "incident_commander@company.com",
+        "password": "Commander-SecOps-2026!"
+    })
+    assert r.status_code == 200
+    token = r.json()["session_token"]
+
+    # Open a completely independent SQLite connection simulating a second uvicorn worker process
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM active_sessions WHERE token = ?", (token,)).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["email"] == "incident_commander@company.com"
+    assert row["role"] == "incident_commander"
+    assert row["is_active"] == 1

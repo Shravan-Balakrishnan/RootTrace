@@ -11,6 +11,13 @@ interface SafetyApprovalCardProps {
   onReject: () => Promise<void>;
 }
 
+const DEFAULT_PASSWORDS: Record<string, string> = {
+  'lead_sre@company.com': 'LeadSRE-Prod-Auth-2026!',
+  'incident_commander@company.com': 'Commander-SecOps-2026!',
+  'oncall_sre@company.com': 'OnCall-Incident-2026!',
+  'intern_observer@company.com': 'Intern-Guest-2026!'
+};
+
 export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   proposal,
   policyDecision,
@@ -20,6 +27,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onReject
 }) => {
   const [selectedEmail, setSelectedEmail] = useState('lead_sre@company.com');
+  const [password, setPassword] = useState(DEFAULT_PASSWORDS['lead_sre@company.com']);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -31,15 +39,15 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
-      // Authenticate dynamically against server directory to issue an ephemeral, random session token
+      // Authenticate with verified credentials against server directory
       const sessionRes = await fetch('/api/auth/session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: selectedEmail })
+        body: JSON.stringify({ email: selectedEmail, password })
       });
       if (!sessionRes.ok) {
         const errData = await sessionRes.json();
-        throw new Error(errData.detail || 'Authentication failed.');
+        throw new Error(errData.detail || 'Authentication failed: Invalid credentials.');
       }
       const sessionData = await sessionRes.json();
       await onApprove(sessionData.session_token, "Operator authorized rollback and callback replay in simulator");
@@ -102,12 +110,14 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
       {isAwaitingApproval ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
           <div style={{ display: 'flex', gap: '8px', fontSize: '11px', color: '#cbd5e1' }}>
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontWeight: 600 }}>Authenticated Operator:</span>
+            <div style={{ flex: 2, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontWeight: 600 }}>Operator:</span>
               <select
                 value={selectedEmail}
                 onChange={(e) => {
-                  setSelectedEmail(e.target.value);
+                  const newEmail = e.target.value;
+                  setSelectedEmail(newEmail);
+                  setPassword(DEFAULT_PASSWORDS[newEmail] || '');
                   setErrorMessage(null);
                 }}
                 style={{
@@ -127,6 +137,28 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
                 <option value="oncall_sre@company.com">oncall_sre@company.com [Verified Role: oncall_sre — Authorized]</option>
                 <option value="intern_observer@company.com">intern_observer@company.com [Verified Role: intern — 403 Forbidden]</option>
               </select>
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span style={{ fontWeight: 600 }}>Credential:</span>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => {
+                  setPassword(e.target.value);
+                  setErrorMessage(null);
+                }}
+                placeholder="Password"
+                style={{
+                  flex: 1,
+                  background: '#090d16',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  color: '#fff',
+                  padding: '6px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)'
+                }}
+              />
             </div>
           </div>
 

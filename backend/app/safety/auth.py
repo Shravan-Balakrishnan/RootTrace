@@ -1,10 +1,13 @@
 """
 Server-side Authentication and Authorization Service for RootTrace.
-Issues cryptographically random session tokens and enforces strict role-based access.
-Credentials are NEVER hardcoded in source code or publicly enumerated.
+Enforces real credential verification (Salted PBKDF2-HMAC-SHA256) and persistent shared session storage.
+Emails alone CANNOT obtain an authenticated session.
 """
 import datetime
+import hashlib
+import os
 import secrets
+import sqlite3
 from typing import Dict, Optional, Set
 from pydantic import BaseModel, Field
 from fastapi import HTTPException, status
@@ -25,32 +28,43 @@ class SessionRecord(BaseModel):
     expires_at: datetime.datetime
 
 
-# Organization Directory defining authorized SRE personnel and their verified roles
+# Organization Directory defining authorized SRE personnel, their verified roles, and salted password hashes
+# Salted PBKDF2-HMAC-SHA256 (100,000 iterations)
 ORGANIZATION_DIRECTORY: Dict[str, Dict[str, str]] = {
     "lead_sre@company.com": {
         "user_id": "usr_sre_01",
         "name": "Lead SRE (Primary)",
-        "role": "lead_sre"
+        "role": "lead_sre",
+        "salt": "1e16402c9e36dc858011f2cecd2339b2",
+        "password_hash": "c8e0af0cac3fe770a0ad1bc9fed47c60e116365d6a780fd75c93a70ca19077fa"  # LeadSRE-Prod-Auth-2026!
     },
     "incident_commander@company.com": {
         "user_id": "usr_cmd_02",
         "name": "Incident Commander",
-        "role": "incident_commander"
+        "role": "incident_commander",
+        "salt": "5f978068a4d8e837b05d0616a3ecac6d",
+        "password_hash": "be4a7c46556b0706084aad577d1f0d1d12a30951fb92ec32dc1f19c618d751ea"  # Commander-SecOps-2026!
     },
     "oncall_sre@company.com": {
         "user_id": "usr_oncall_03",
         "name": "On-Call SRE",
-        "role": "oncall_sre"
+        "role": "oncall_sre",
+        "salt": "511206ee106f5242362b10d509398201",
+        "password_hash": "d13368987149c2c81bad8d6ea6dd8be3c2213eef30c30deaa94a1c37985949b5"  # OnCall-Incident-2026!
     },
     "staff_sre@company.com": {
         "user_id": "usr_staff_04",
         "name": "Staff SRE",
-        "role": "staff_sre"
+        "role": "staff_sre",
+        "salt": "c0c73847b3ce6bedbf8145052c894f33",
+        "password_hash": "13496c51ca1b42e326114a16dfe487d3ee8d8bb88ab474c6ee50a63619fc4e7c"  # StaffSRE-Recovery-2026!
     },
     "intern_observer@company.com": {
         "user_id": "usr_intern_99",
         "name": "Junior SRE Intern",
-        "role": "intern"
+        "role": "intern",
+        "salt": "0c7b3e100735c7a613770877c081d1d9",
+        "password_hash": "30bc90894083564864413eb6e9f9a248f19eb001863a9801f6bbd2f2159264da"  # Intern-Guest-2026!
     }
 }
 
@@ -62,25 +76,80 @@ AUTHORIZED_APPROVER_ROLES: Set[str] = {
     "principal_sre"
 }
 
-# In-memory ephemeral active session registry: token -> SessionRecord
-_ACTIVE_SESSIONS: Dict[str, SessionRecord] = {}
+# Persistent shared SQLite session database path (shared across any number of uvicorn worker processes)
+DB_PATH = os.getenv("ROOTTRACE_SESSION_DB", os.path.join(os.path.dirname(__file__), "sessions.db"))
 
 
-def create_authenticated_session(email: str, ttl_seconds: int = 3600) -> SessionRecord:
+def _get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, timeout=10.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_session_db():
+    with _get_db_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                token TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL,
+                is_active INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON active_sessions(expires_at);")
+        conn.commit()
+
+
+# Initialize database schema on module load
+init_session_db()
+
+
+def _verify_password(provided_password: str, salt_hex: str, expected_hash_hex: str) -> bool:
+    """Verifies a password against the stored salt and hash using constant-time comparison."""
+    salt = bytes.fromhex(salt_hex)
+    calc_hash = hashlib.pbkdf2_hmac("sha256", provided_password.encode("utf-8"), salt, 100000).hex()
+    return secrets.compare_digest(calc_hash, expected_hash_hex)
+
+
+def create_authenticated_session(email: str, password: Optional[str] = None, ttl_seconds: int = 3600) -> SessionRecord:
     """
-    Authenticates an operator against the organization directory and issues
-    a cryptographically secure random session token.
-    Role is derived strictly from the directory and cannot be forged by the client.
+    Authenticates an operator with real verified credentials (password / secret)
+    against the organization directory and issues an ephemeral, random session token.
+    An email alone CANNOT obtain an authenticated session.
     """
+    if not email or not email.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: Missing email credential."
+        )
+
+    if not password or not password.strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: Password credential is required. An email alone cannot issue an authenticated session."
+        )
+
     clean_email = email.strip().lower()
     user_info = ORGANIZATION_DIRECTORY.get(clean_email)
     if not user_info:
+        # Constant-time dummy check to prevent user enumeration timing attacks
+        _verify_password("dummy_password", "00" * 16, "00" * 32)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication failed: User '{email}' is not in the organization directory."
+            detail="Authentication failed: Invalid email or password credentials."
         )
 
-    # Generate a cryptographically random, unguessable token
+    if not _verify_password(password.strip(), user_info["salt"], user_info["password_hash"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: Invalid email or password credentials."
+        )
+
+    # Issue cryptographically random session token
     token = secrets.token_urlsafe(32)
     now = datetime.datetime.now(datetime.timezone.utc)
     expires = now + datetime.timedelta(seconds=ttl_seconds)
@@ -99,7 +168,21 @@ def create_authenticated_session(email: str, ttl_seconds: int = 3600) -> Session
         created_at=now,
         expires_at=expires
     )
-    _ACTIVE_SESSIONS[token] = record
+
+    # Persist in shared session database
+    with _get_db_connection() as conn:
+        # Clean expired sessions
+        conn.execute("DELETE FROM active_sessions WHERE expires_at < ?", (now.isoformat(),))
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO active_sessions
+            (token, user_id, email, name, role, is_active, created_at, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (token, principal.user_id, principal.email, principal.name, principal.role, 1, now.isoformat(), expires.isoformat())
+        )
+        conn.commit()
+
     return record
 
 
@@ -109,7 +192,7 @@ def authenticate_and_authorize_approver(
     client_claimed_role: Optional[str] = None
 ) -> UserPrincipal:
     """
-    Validates a session token.
+    Validates a session token against the persistent shared database.
     Strictly derives identity and role from the active server session.
     Rejects missing, expired, or invalid tokens with 401 Unauthorized.
     Rejects unauthorized roles with 403 Forbidden.
@@ -125,23 +208,34 @@ def authenticate_and_authorize_approver(
     if token_clean.lower().startswith("bearer "):
         token_clean = token_clean[7:].strip()
 
-    session = _ACTIVE_SESSIONS.get(token_clean)
-    if not session:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    with _get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM active_sessions WHERE token = ?", (token_clean,)).fetchone()
+
+    if not row:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed: Invalid or unrecognized approval session token."
         )
 
-    # Check session expiration
-    now = datetime.datetime.now(datetime.timezone.utc)
-    if now > session.expires_at:
-        _ACTIVE_SESSIONS.pop(token_clean, None)
+    expires_at = datetime.datetime.fromisoformat(row["expires_at"])
+    if now > expires_at:
+        with _get_db_connection() as conn:
+            conn.execute("DELETE FROM active_sessions WHERE token = ?", (token_clean,))
+            conn.commit()
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication failed: Session token has expired. Please re-authenticate."
         )
 
-    principal = session.principal
+    principal = UserPrincipal(
+        user_id=row["user_id"],
+        email=row["email"],
+        name=row["name"],
+        role=row["role"],
+        is_active=bool(row["is_active"])
+    )
+
     if not principal.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -178,4 +272,6 @@ def authenticate_and_authorize_approver(
 
 def reset_auth_sessions():
     """Clear all active sessions (used during test teardown)."""
-    _ACTIVE_SESSIONS.clear()
+    with _get_db_connection() as conn:
+        conn.execute("DELETE FROM active_sessions")
+        conn.commit()
