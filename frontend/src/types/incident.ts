@@ -193,6 +193,8 @@ export interface SystemStatus {
     model_name: string;
     api_key_configured: boolean;
     mode: string;
+    state?: string;
+    last_error?: string | null;
   };
   active_scenario: string;
   tool_count: number;

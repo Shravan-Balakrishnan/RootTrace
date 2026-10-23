@@ -143,21 +143,51 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* AI Mode Indicator */}
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          padding: '4px 10px',
-          borderRadius: '6px',
-          fontSize: '11px',
-          fontFamily: 'var(--font-mono)',
-          background: systemStatus?.llm.api_key_configured ? 'rgba(16, 185, 129, 0.12)' : 'rgba(245, 158, 11, 0.12)',
-          border: `1px solid ${systemStatus?.llm.api_key_configured ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)'}`,
-          color: systemStatus?.llm.api_key_configured ? '#34d399' : '#fbbf24'
-        }}>
-          <Cpu size={12} />
-          <span>{systemStatus?.llm.mode || 'REASONING_ENGINE'}</span>
-        </div>
+        {(() => {
+          const llmState = systemStatus?.llm.state || (systemStatus?.llm.api_key_configured ? 'cloud_configured' : 'deterministic');
+          let bg = 'rgba(245, 158, 11, 0.12)';
+          let border = 'rgba(245, 158, 11, 0.3)';
+          let color = '#fbbf24';
+          let label = `DETERMINISTIC FALLBACK (${systemStatus?.llm.model_name || 'reasoner-v1'})`;
+
+          if (llmState === 'cloud_ready') {
+            bg = 'rgba(16, 185, 129, 0.15)';
+            border = 'rgba(16, 185, 129, 0.4)';
+            color = '#34d399';
+            label = `AI READY: ${systemStatus?.llm.provider.toUpperCase()} (${systemStatus?.llm.model_name})`;
+          } else if (llmState === 'cloud_configured') {
+            bg = 'rgba(6, 182, 212, 0.15)';
+            border = 'rgba(6, 182, 212, 0.4)';
+            color = '#38bdf8';
+            label = `AI CONFIGURED: ${systemStatus?.llm.provider.toUpperCase()} (${systemStatus?.llm.model_name})`;
+          } else if (llmState === 'cloud_error') {
+            bg = 'rgba(239, 68, 68, 0.15)';
+            border = 'rgba(239, 68, 68, 0.4)';
+            color = '#f87171';
+            label = `AI ERROR (FALLBACK ACTIVE)`;
+          }
+
+          return (
+            <div
+              title={systemStatus?.llm.last_error ? `Provider Error: ${systemStatus.llm.last_error}` : `Provider: ${systemStatus?.llm.provider}`}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '4px 10px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontFamily: 'var(--font-mono)',
+                background: bg,
+                border: `1px solid ${border}`,
+                color: color
+              }}
+            >
+              <Cpu size={12} />
+              <span>{label}</span>
+            </div>
+          );
+        })()}
 
         {/* Action Buttons */}
         <button

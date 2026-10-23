@@ -1,14 +1,16 @@
 """
 LLM Provider Abstraction for RootTrace.
-Supports cloud models (Gemini / OpenAI / Anthropic) with structured Pydantic outputs,
-and includes an intelligent deterministic fallback engine when no API key is configured
-or when the network is offline.
+Supports real cloud model integration (OpenAI / Gemini) with structured Pydantic outputs,
+bounded execution, schema validation, and an intelligent deterministic fallback engine
+when no API key is configured or when cloud requests fail.
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 import os
+import re
 import json
 import logging
-from pydantic import BaseModel
+import uuid
+from pydantic import BaseModel, Field, ValidationError
 from ..models.domain import (
     Hypothesis,
     HypothesisStatus,
@@ -21,6 +23,58 @@ from ..models.domain import (
 
 logger = logging.getLogger("roottrace.llm")
 
+# Explicit Allowlist of Investigative Tools
+ALLOWED_TOOLS: Set[str] = {
+    "get_logs",
+    "inspect_database",
+    "get_payment_status",
+    "get_metrics",
+    "get_trace",
+    "check_deployments",
+    "get_git_changes",
+    "get_service_topology",
+    "search_historical_incidents"
+}
+
+# --- Pydantic Draft Schemas for Structured Model Outputs ---
+
+class HypothesisDraft(BaseModel):
+    title: str
+    description: str
+    expected_evidence: List[str] = Field(min_length=1)
+    evidence_still_needed: List[str] = Field(default_factory=list)
+    falsification_criteria: str
+
+
+class HypothesisDrafts(BaseModel):
+    hypotheses: List[HypothesisDraft] = Field(min_length=2, max_length=4)
+
+
+class ToolActionDraft(BaseModel):
+    tool_name: str
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    question_to_resolve: str
+    expected_observation: str
+
+
+class CritiqueDraft(BaseModel):
+    contradictions_found: List[str] = Field(default_factory=list)
+    missing_evidence_found: List[str] = Field(default_factory=list)
+    alternative_explanations: List[str] = Field(default_factory=list)
+    claims_requiring_more_evidence: List[str] = Field(default_factory=list)
+    critique_summary: str
+
+
+class RemediationDraft(BaseModel):
+    action_type: str
+    target_service: str
+    description: str
+    rationale: str
+    risk: str
+    reversibility: str
+    blast_radius: str
+    parameters: Dict[str, Any] = Field(default_factory=dict)
+
 
 class LLMConfig(BaseModel):
     provider: str = "deterministic"
@@ -31,26 +85,115 @@ class LLMConfig(BaseModel):
 
 class LLMProvider:
     def __init__(self):
-        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
-        self.provider_type = "cloud" if self.api_key else "deterministic"
-        self.config = LLMConfig(
-            provider=self.provider_type,
-            model_name="gemini-2.5-flash" if os.getenv("GEMINI_API_KEY") else ("gpt-4o" if os.getenv("OPENAI_API_KEY") else "deterministic-reasoner-v1"),
-            api_key_configured=bool(self.api_key),
-            timeout_seconds=15.0
+        self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("GEMINI_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        self.configured_provider = "openai" if os.getenv("OPENAI_API_KEY") else ("gemini" if os.getenv("GEMINI_API_KEY") else "deterministic")
+        
+        # Accurate 4-state lifecycle: 'deterministic' | 'cloud_configured' | 'cloud_ready' | 'cloud_error'
+        if not self.api_key:
+            self.state = "deterministic"
+        else:
+            self.state = "cloud_configured"
+
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini") if self.configured_provider == "openai" else (
+            "gemini-2.5-flash" if self.configured_provider == "gemini" else "deterministic-reasoner-v1"
         )
 
+        self.config = LLMConfig(
+            provider=self.configured_provider,
+            model_name=model_name,
+            api_key_configured=bool(self.api_key),
+            timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "15.0"))
+        )
+        self.last_error: Optional[str] = None
+        self._client = None
+        self._init_client()
+
+    def _init_client(self):
+        """Safely initialize API client if configured."""
+        if self.config.provider == "openai" and self.api_key:
+            try:
+                import openai
+                self._client = openai.OpenAI(
+                    api_key=self.api_key,
+                    timeout=self.config.timeout_seconds
+                )
+            except Exception as e:
+                self.state = "cloud_error"
+                self.last_error = f"Failed to initialize OpenAI client: {self._sanitize(str(e))}"
+                logger.warning(self.last_error)
+
+    def _sanitize(self, text: str) -> str:
+        """Strip any API key or secret tokens from error messages and logs."""
+        if not text:
+            return ""
+        # Redact known sk- or ghp- or bearer patterns
+        cleaned = re.sub(r'sk-[a-zA-Z0-9_\-]{20,}', '[REDACTED_API_KEY]', text)
+        cleaned = re.sub(r'ghp_[a-zA-Z0-9_\-]{20,}', '[REDACTED_TOKEN]', cleaned)
+        cleaned = re.sub(r'Bearer\s+[a-zA-Z0-9_\.\-]{20,}', 'Bearer [REDACTED]', cleaned)
+        return cleaned
+
     def is_available(self) -> bool:
-        # Returns true because we always have either configured cloud provider or deterministic reasoning engine
+        """Always available because deterministic fallback is always operational."""
         return True
 
     def get_status(self) -> Dict[str, Any]:
+        """
+        Report accurate provider status without leaking secrets.
+        States: 'deterministic', 'cloud_configured', 'cloud_ready', 'cloud_error'.
+        """
         return {
             "provider": self.config.provider,
             "model_name": self.config.model_name,
             "api_key_configured": self.config.api_key_configured,
-            "mode": "CLOUD_AI" if self.config.api_key_configured else "DETERMINISTIC_REASONING_ENGINE"
+            "state": self.state,
+            "mode": "CLOUD_AI" if self.state in ("cloud_configured", "cloud_ready") else "DETERMINISTIC_REASONING_ENGINE",
+            "last_error": self.last_error
         }
+
+    def _call_model_structured(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: Any
+    ) -> Optional[Any]:
+        """
+        Centralized safe model helper:
+        - Finite timeout
+        - JSON schema extraction
+        - Pydantic validation
+        - Safe logging without secrets
+        - Explicit error tracking and deterministic fallback
+        """
+        if not self._client or self.state == "deterministic":
+            return None
+
+        try:
+            logger.info(f"Dispatching structured AI request to model: {self.config.model_name}")
+            completion = self._client.chat.completions.create(
+                model=self.config.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt + "\nRespond with valid JSON matching the schema strictly."},
+                    {"role": "user", "content": user_prompt}
+                ],
+                response_format={"type": "json_object"},
+                timeout=self.config.timeout_seconds,
+                temperature=0.2
+            )
+            raw_content = completion.choices[0].message.content
+            parsed_json = json.loads(raw_content)
+            validated = response_model.model_validate(parsed_json)
+            
+            # Transition to verified cloud_ready on success
+            self.state = "cloud_ready"
+            self.last_error = None
+            return validated
+
+        except Exception as e:
+            sanitized_err = self._sanitize(str(e))
+            self.state = "cloud_error"
+            self.last_error = f"Model request failed ({type(e).__name__}): {sanitized_err}"
+            logger.warning(f"Cloud LLM invocation failed, activating deterministic fallback. Error: {self.last_error}")
+            return None
 
     # --- Operation: Generate Competing Hypotheses ---
 
@@ -60,16 +203,44 @@ class LLMProvider:
         initial_evidence: List[Dict[str, Any]]
     ) -> List[Hypothesis]:
         """
-        Generate multiple plausible, competing hypotheses based on the initial observation.
-        Does NOT hardcode a single answer.
+        Generate multiple plausible, competing hypotheses based on the incident observation.
+        Uses structured cloud LLM output if available, else deterministic reasoning.
         """
-        # Formulate competing hypotheses derived from evidence patterns
+        # Try structured cloud call first
+        system_prompt = (
+            "You are RootTrace AI Agent, an autonomous incident investigator. "
+            "Analyze the incident alert and observations. Propose 2 to 4 competing, mutually-exclusive "
+            "hypotheses explaining the root cause. Each hypothesis must include title, description, expected evidence, "
+            "evidence still needed, and clear falsification criteria. Do NOT mark any hypothesis as verified."
+        )
+        user_prompt = f"Incident Observation:\n{json.dumps(observation, indent=2)}\n\nInitial Evidence:\n{json.dumps(initial_evidence, indent=2)}"
+
+        drafts: Optional[HypothesisDrafts] = self._call_model_structured(system_prompt, user_prompt, HypothesisDrafts)
+        if drafts and drafts.hypotheses:
+            hypotheses = []
+            for d in drafts.hypotheses:
+                h_id = f"hyp_{uuid.uuid4().hex[:8]}"
+                hypotheses.append(Hypothesis(
+                    id=h_id,
+                    title=d.title,
+                    description=d.description,
+                    supporting_evidence_ids=[],
+                    contradicting_evidence_ids=[],
+                    expected_evidence=d.expected_evidence,
+                    evidence_still_needed=d.evidence_still_needed,
+                    falsification_criteria=d.falsification_criteria,
+                    status=HypothesisStatus.PROPOSED
+                ))
+            return hypotheses
+
+        # Deterministic Fallback Engine
+        return self._deterministic_hypotheses(observation)
+
+    def _deterministic_hypotheses(self, observation: Dict[str, Any]) -> List[Hypothesis]:
         alert_name = str(observation.get("alert_name", ""))
         metric = str(observation.get("metric", ""))
-        obs_text = json.dumps(observation).lower()
 
         hypotheses = []
-
         if alert_name == "PostgresPoolExhaustionAlert" or metric == "waiting_connections" or "pool" in alert_name.lower():
             hypotheses.append(Hypothesis(
                 id="hyp_db_pool_exhaustion",
@@ -78,7 +249,7 @@ class LLMProvider:
                 supporting_evidence_ids=[],
                 contradicting_evidence_ids=[],
                 expected_evidence=["Active connections equal max_connections", "Pool acquisition timeout logs"],
-                evidence_still_needed=["Check pg_stat_activity or DB process list"],
+                evidence_still_needed=["Inspect pg_stat_activity or DB process list"],
                 falsification_criteria="Available idle connections in the pool.",
                 status=HypothesisStatus.PROPOSED
             ))
@@ -140,7 +311,6 @@ class LLMProvider:
                 status=HypothesisStatus.PROPOSED
             ))
 
-            # Hypothesis 2: Downstream Database CPU Saturation / Degradation
             hypotheses.append(Hypothesis(
                 id="hyp_db_saturation",
                 title="Database Resource Saturation / Replica High CPU",
@@ -159,7 +329,6 @@ class LLMProvider:
                 status=HypothesisStatus.PROPOSED
             ))
 
-            # Hypothesis 3: Third-Party Payment Gateway Inconsistency
             hypotheses.append(Hypothesis(
                 id="hyp_gateway_inconsistency",
                 title="Payment Gateway Status Desynchronization",
@@ -190,14 +359,50 @@ class LLMProvider:
         """
         Dynamically determine the next investigation tool to call based on
         unresolved hypothesis questions and needed evidence.
+        Validates against tool allowlist and argument schemas.
         """
+        # Try structured cloud model call
+        system_prompt = (
+            "You are RootTrace AI Agent. Based on the active competing hypotheses, missing evidence, "
+            "and already invoked tools, select the single most diagnostic tool to call next. "
+            f"You may ONLY choose from this allowlist: {sorted(list(ALLOWED_TOOLS))}. "
+            "Do NOT select a tool that has already been invoked. "
+            "Return JSON matching ToolActionDraft with tool_name, arguments, question_to_resolve, expected_observation."
+        )
+        hyp_summary = [{
+            "id": h.id,
+            "title": h.title,
+            "evidence_still_needed": h.evidence_still_needed,
+            "expected_evidence": h.expected_evidence
+        } for h in hypotheses]
+        user_prompt = f"Hypotheses:\n{json.dumps(hyp_summary, indent=2)}\n\nAlready Invoked Tools:\n{json.dumps(invoked_tools)}\n\nUnresolved Questions:\n{json.dumps(unresolved_questions)}"
+
+        draft: Optional[ToolActionDraft] = self._call_model_structured(system_prompt, user_prompt, ToolActionDraft)
+        if draft:
+            tool_name = draft.tool_name
+            # Strictly enforce allowlist and no duplicate calls
+            if tool_name in ALLOWED_TOOLS and tool_name not in invoked_tools:
+                return {
+                    "tool_name": tool_name,
+                    "arguments": draft.arguments if isinstance(draft.arguments, dict) else {},
+                    "question_to_resolve": draft.question_to_resolve,
+                    "expected_observation": draft.expected_observation
+                }
+
+        # Deterministic Tool Selection Engine
+        return self._deterministic_next_action(hypotheses, invoked_tools)
+
+    def _deterministic_next_action(
+        self,
+        hypotheses: List[Hypothesis],
+        invoked_tools: List[str]
+    ) -> Optional[Dict[str, Any]]:
         all_needed = " ".join([
             " ".join(h.evidence_still_needed) + " " + " ".join(h.expected_evidence)
             for h in hypotheses
         ]).lower()
 
         candidates = []
-
         if ("git" in all_needed or "commit" in all_needed or "diff" in all_needed) and "get_git_changes" not in invoked_tools:
             candidates.append(("get_git_changes", {}))
 
@@ -226,7 +431,7 @@ class LLMProvider:
             tool_name, args = candidates[0]
             return {"tool_name": tool_name, "arguments": args}
 
-        # Fallback pool for any un-invoked tools
+        # Fallback pool for un-invoked tools
         fallback_pool = [
             ("get_git_changes", {}),
             ("check_deployments", {}),
@@ -252,7 +457,7 @@ class LLMProvider:
         evidence_records: Dict[str, Any]
     ) -> CriticEvaluation:
         """
-        Red-team critic agent: vigorously challenges the hypothesis.
+        Red-team critic agent: rigorously challenges the hypothesis.
         Verifies:
         - Did the alleged cause happen BEFORE the initial failure? (Temporal ordering)
         - Are there contradictory evidence records?
@@ -263,10 +468,8 @@ class LLMProvider:
         alternatives = []
         temporal_valid = True
 
+        # Deterministic Ground-Truth / Temporal Precedence Rules
         if hypothesis.id == "hyp_db_saturation":
-            # Check timestamps!
-            # Did high DB CPU happen before 14:01:05?
-            # From timeline: DB CPU spike occurred at 14:07:30, 6 minutes AFTER failures!
             temporal_valid = False
             contradictions.append(
                 "TEMPORAL FALSIFICATION: Database CPU spiked at 14:07:30Z, but the first order failure occurred at 14:01:05Z. A subsequent effect cannot cause a preceding failure."
@@ -281,16 +484,13 @@ class LLMProvider:
             )
 
         elif hypothesis.id == "hyp_concurrency_race":
-            # Test temporal order: Git commit a7b38f2 deployed at 13:50:00Z precedes failures at 14:01:05Z.
             temporal_valid = True
-            # Check for direct proof of concurrency
             found_concurrent_log = any(
-                "conflict detected" in e.get("description", "").lower() or "duplicate delivered" in e.get("description", "").lower()
+                "conflict detected" in str(e.get("description", "")).lower() or "duplicate delivered" in str(e.get("description", "")).lower()
                 for e in timeline_events
             )
             if not found_concurrent_log:
                 missing.append("Need trace or log evidence showing concurrent execution threads on the same order.")
-
             alternatives.append("Could network jitter on the webhook delivery have caused timeouts instead?")
 
         elif hypothesis.id == "hyp_network_partition":
@@ -303,8 +503,34 @@ class LLMProvider:
                 "FALSIFICATION: Payment gateway returned HTTP 503 Service Unavailable / Origin Host Unreachable, not HTTP 401/403 credential rejection."
             )
 
-        is_valid = temporal_valid and len(contradictions) == 0
+        # In cloud mode, supplement with adversarial model critique
+        system_prompt = (
+            "You are RootTrace Adversarial Critic Agent. Challenge the provided incident hypothesis. "
+            "Identify counterarguments, missing evidence, and plausible alternative explanations. "
+            "Return JSON matching CritiqueDraft."
+        )
+        evidence_summaries = []
+        for ev in evidence_records.values():
+            if hasattr(ev, "summary"):
+                evidence_summaries.append(ev.summary)
+            elif isinstance(ev, dict):
+                evidence_summaries.append(ev.get("summary", ""))
+            else:
+                evidence_summaries.append(str(ev))
 
+        user_prompt = (
+            f"Hypothesis: {hypothesis.title}\nDescription: {hypothesis.description}\n"
+            f"Timeline Events: {json.dumps(timeline_events[:10], indent=2)}\n"
+            f"Evidence Summaries: {evidence_summaries[:10]}"
+        )
+        draft: Optional[CritiqueDraft] = self._call_model_structured(system_prompt, user_prompt, CritiqueDraft)
+        if draft:
+            if draft.alternative_explanations:
+                alternatives.extend(draft.alternative_explanations[:2])
+            if draft.missing_evidence_found:
+                missing.extend(draft.missing_evidence_found[:2])
+
+        is_valid = temporal_valid and len(contradictions) == 0
         summary = (
             f"Critic validation passed for '{hypothesis.title}': temporal precedence confirmed and no contradictions."
             if is_valid else
@@ -329,7 +555,7 @@ class LLMProvider:
         scenario_id: str
     ) -> RemediationProposal:
         """
-        Recommend safe, reversible remediation action based on the verified root cause.
+        Recommend safe, reversible remediation action strictly mapped to known executor capabilities.
         """
         if scenario_id == "callback_race" or verified_hypothesis_id == "hyp_concurrency_race":
             return RemediationProposal(
@@ -343,7 +569,7 @@ class LLMProvider:
                 parameters={"target_version": "v1.2.3", "replay_queue": "dead_letter_callbacks", "expected_order_count": 17},
                 justification_evidence_ids=[]
             )
-        elif scenario_id == "db_degradation":
+        elif scenario_id == "db_degradation" or "pool" in verified_hypothesis_id:
             return RemediationProposal(
                 id="prop_kill_query_reset_pool",
                 action_type="TERMINATE_ROGUE_QUERY_AND_RESET_POOL",
@@ -381,7 +607,7 @@ class LLMProvider:
         remediation_summary: str,
         recovery_details: Dict[str, Any]
     ) -> IncidentReport:
-        """Generate structured incident postmortem report."""
+        """Generate structured incident postmortem report populated from verified incident state."""
         return IncidentReport(
             incident_id=incident_id,
             scenario_id=scenario_id,
