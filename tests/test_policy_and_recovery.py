@@ -106,3 +106,55 @@ def test_remediation_executor_rejects_unauthorized():
     res = orch.remediation_executor.execute(prop, fake_approval)
     assert res["success"] is False
     assert res["execution_status"] == ExecutionStatus.REJECTED
+
+
+def test_prevent_duplicate_remediation_approval():
+    orch = Orchestrator("callback_race")
+    orch.run_full_investigation_loop()
+    orch.approve_remediation(approver="lead_sre@company.com", comment="First approval")
+    assert orch.incident.current_phase == InvestigationPhase.RESOLVED
+
+    # Second approval attempt must be blocked
+    with pytest.raises(ValueError, match="already been executed"):
+        orch.approve_remediation(approver="lead_sre@company.com", comment="Duplicate attempt")
+
+
+def test_reject_empty_approver():
+    orch = Orchestrator("callback_race")
+    orch.run_full_investigation_loop()
+
+    with pytest.raises(ValueError, match="explicit approver identity is required"):
+        orch.approve_remediation(approver="   ")
+
+
+def test_blocked_remediation_when_paused():
+    orch = Orchestrator("callback_race")
+    orch.run_full_investigation_loop()
+    orch.pause_autonomy()
+
+    with pytest.raises(ValueError, match="Autonomy is currently paused"):
+        orch.approve_remediation(approver="lead_sre@company.com")
+
+
+def test_honest_recovery_verification_failure():
+    orch = Orchestrator("callback_race")
+    orch.run_full_investigation_loop()
+
+    # Intentionally leave one order in FAILED state in simulator to simulate a recovery failure
+    original_verify = orch.remediation_executor.verify_recovery
+
+    def corrupted_verify():
+        rec = original_verify()
+        rec.all_checks_passed = False
+        rec.summary = "Invariant broken: 14/17 orders confirmed"
+        return rec
+
+    orch.remediation_executor.verify_recovery = corrupted_verify
+
+    # Approve remediation
+    orch.approve_remediation(approver="lead_sre@company.com")
+
+    # MUST NOT be marked RESOLVED
+    assert orch.incident.current_phase == InvestigationPhase.FAILED
+    assert orch.incident.recovery_result.all_checks_passed is False
+

@@ -104,17 +104,14 @@ async def stream_investigation():
         yield f"data: {json.dumps({'event': 'started', 'incident': orchestrator.incident.model_dump()})}\n\n"
         await asyncio.sleep(0.3)
 
-        pipeline = [
-            ("observe", orchestrator.step_observe, 0.45),
-            ("collect_initial", orchestrator.step_collect_initial_evidence, 0.55),
-            ("build_timeline", orchestrator.step_build_timeline, 0.45),
-            ("hypotheses", orchestrator.step_generate_hypotheses, 0.55),
-            ("investigate", orchestrator.step_investigate_tools, 0.65),
-            ("critique", orchestrator.step_critique, 0.55),
-            ("verify", orchestrator.step_verify, 0.45)
+        pipeline_init = [
+            ("observe", orchestrator.step_observe, 0.4),
+            ("collect_initial", orchestrator.step_collect_initial_evidence, 0.5),
+            ("build_timeline", orchestrator.step_build_timeline, 0.4),
+            ("hypotheses", orchestrator.step_generate_hypotheses, 0.5),
         ]
 
-        for name, step_fn, delay in pipeline:
+        for name, step_fn, delay in pipeline_init:
             if orchestrator.incident.is_autonomous_paused:
                 yield f"data: {json.dumps({'event': 'paused', 'incident': orchestrator.incident.model_dump()})}\n\n"
                 return
@@ -123,10 +120,38 @@ async def stream_investigation():
             yield f"data: {json.dumps({'event': name, 'phase': orchestrator.incident.current_phase.value, 'incident': orchestrator.incident.model_dump()})}\n\n"
             await asyncio.sleep(delay)
 
-            if orchestrator.incident.current_phase == InvestigationPhase.AWAITING_APPROVAL:
-                break
+        # Granular investigation tool execution
+        orchestrator._transition_to(InvestigationPhase.INVESTIGATING, "Invoking targeted investigation tools to test hypotheses")
+        yield f"data: {json.dumps({'event': 'investigating_started', 'phase': orchestrator.incident.current_phase.value, 'incident': orchestrator.incident.model_dump()})}\n\n"
+        await asyncio.sleep(0.3)
 
-        yield f"data: {json.dumps({'event': 'awaiting_approval', 'incident': orchestrator.incident.model_dump()})}\n\n"
+        for _ in range(4):
+            if orchestrator.incident.is_autonomous_paused:
+                yield f"data: {json.dumps({'event': 'paused', 'incident': orchestrator.incident.model_dump()})}\n\n"
+                return
+
+            act = orchestrator.step_single_tool()
+            if not act:
+                break
+            yield f"data: {json.dumps({'event': 'tool_invoked', 'tool': act['tool_name'], 'phase': orchestrator.incident.current_phase.value, 'incident': orchestrator.incident.model_dump()})}\n\n"
+            await asyncio.sleep(0.45)
+
+        pipeline_verify = [
+            ("critique", orchestrator.step_critique, 0.5),
+            ("verify", orchestrator.step_verify, 0.4)
+        ]
+
+        for name, step_fn, delay in pipeline_verify:
+            if orchestrator.incident.is_autonomous_paused:
+                yield f"data: {json.dumps({'event': 'paused', 'incident': orchestrator.incident.model_dump()})}\n\n"
+                return
+
+            step_fn()
+            yield f"data: {json.dumps({'event': name, 'phase': orchestrator.incident.current_phase.value, 'incident': orchestrator.incident.model_dump()})}\n\n"
+            await asyncio.sleep(delay)
+
+        if orchestrator.incident.current_phase == InvestigationPhase.AWAITING_APPROVAL:
+            yield f"data: {json.dumps({'event': 'awaiting_approval', 'incident': orchestrator.incident.model_dump()})}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

@@ -85,3 +85,28 @@ def test_system_status_reports_authentic_llm_mode(client):
     # Must report whether API key is configured or deterministic fallback
     assert data["llm"]["mode"] in ["CLOUD_AI", "DETERMINISTIC_REASONING_ENGINE"]
     assert data["tool_count"] == 9
+
+
+def test_sse_stream_events_delivery(client):
+    # Select Scenario A and connect to stream
+    client.post("/api/scenarios/select", json={"scenario_id": "callback_race"})
+    with client.stream("GET", "/api/investigate/stream") as response:
+        assert response.status_code == 200
+        assert "text/event-stream" in response.headers["content-type"]
+        events = []
+        for line in response.iter_lines():
+            if line.startswith("data: "):
+                import json
+                ev = json.loads(line[6:])
+                events.append(ev)
+
+        assert len(events) >= 5
+        event_names = [e.get("event") for e in events]
+        assert "started" in event_names
+        assert "investigating_started" in event_names
+        assert "tool_invoked" in event_names
+        assert "verify" in event_names
+        assert "awaiting_approval" in event_names
+        # Every event must carry a consistent run_id
+        run_ids = {e["incident"]["run_id"] for e in events if "incident" in e and "run_id" in e["incident"]}
+        assert len(run_ids) == 1

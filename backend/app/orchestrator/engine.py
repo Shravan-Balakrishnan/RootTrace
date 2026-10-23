@@ -119,38 +119,43 @@ class Orchestrator:
         self.incident.hypotheses = hypotheses
         self.incident.decision_trace.append(f"Generated {len(hypotheses)} competing hypotheses for investigation.")
 
-    def step_investigate_tools(self, max_tool_steps: int = 4):
-        """Phase: INVESTIGATE USING TOOLS - Target unresolved questions"""
-        self._transition_to(InvestigationPhase.INVESTIGATING, "Invoking investigation tools to test hypotheses")
+    def step_single_tool(self) -> Optional[dict]:
+        """Execute one targeted tool based on active hypotheses and evidence gaps."""
+        if self.incident.current_phase != InvestigationPhase.INVESTIGATING:
+            self._transition_to(InvestigationPhase.INVESTIGATING, "Invoking investigation tools to test hypotheses")
 
         invoked_tool_names = [tc.tool_name for tc in self.incident.tool_calls]
+        next_action = self.llm.choose_next_action(
+            self.incident.hypotheses,
+            invoked_tool_names,
+            ["Verify recent code changes", "Inspect trace spans", "Check payment gateway records"]
+        )
+        if not next_action:
+            return None
 
-        for _ in range(max_tool_steps):
-            next_action = self.llm.choose_next_action(
-                self.incident.hypotheses,
-                invoked_tool_names,
-                ["Verify recent code changes", "Inspect trace spans", "Check payment gateway records"]
-            )
-            if not next_action:
-                break
+        tool_name = next_action["tool_name"]
+        tool_args = next_action["arguments"]
+        tool_fn = getattr(self.tools, tool_name, None)
+        res = None
+        if tool_fn:
+            res = tool_fn(**tool_args)
+            for eid in res.get("evidence_ids", []):
+                self.incident.evidence_records[eid] = self.tools.evidence_store[eid]
 
-            tool_name = next_action["tool_name"]
-            tool_args = next_action["arguments"]
-            invoked_tool_names.append(tool_name)
-
-            # Invoke tool dynamically
-            tool_fn = getattr(self.tools, tool_name, None)
-            if tool_fn:
-                res = tool_fn(**tool_args)
-                for eid in res.get("evidence_ids", []):
-                    self.incident.evidence_records[eid] = self.tools.evidence_store[eid]
-
-        # Refresh tool logs and rebuild timeline with newly acquired evidence
         self.incident.tool_calls = list(self.tools.tool_logs)
         self.incident.timeline = EvidenceEngine.build_timeline(self.incident.evidence_records)
-
-        # Attribute evidence and compute scores for each hypothesis
         self._attribute_evidence_to_hypotheses()
+        return {"tool_name": tool_name, "arguments": tool_args, "result": res}
+
+    def step_investigate_tools(self, max_tool_steps: int = 4):
+        """Phase: INVESTIGATE USING TOOLS - Target unresolved questions"""
+        if self.incident.current_phase != InvestigationPhase.INVESTIGATING:
+            self._transition_to(InvestigationPhase.INVESTIGATING, "Invoking investigation tools to test hypotheses")
+
+        for _ in range(max_tool_steps):
+            act = self.step_single_tool()
+            if not act:
+                break
 
     def _attribute_evidence_to_hypotheses(self):
         """Correlate collected evidence with hypotheses and calculate scores."""
@@ -282,8 +287,20 @@ class Orchestrator:
 
     def approve_remediation(self, approver: str = "oncall_engineer@company.com", comment: Optional[str] = None):
         """Operator explicitly approves remediation"""
+        if not approver or not approver.strip():
+            raise ValueError("An explicit approver identity is required.")
+
         if not self.incident.remediation_proposal:
             raise ValueError("No remediation proposal exists to approve.")
+
+        if self.incident.is_autonomous_paused:
+            raise ValueError("Autonomy is currently paused. Resume autonomy to proceed with remediation.")
+
+        if self.incident.execution_status == ExecutionStatus.COMPLETED or self.incident.current_phase in (InvestigationPhase.RESOLVED, InvestigationPhase.REMEDIATING):
+            raise ValueError("Remediation has already been executed for this incident.")
+
+        if not self.incident.verification or self.incident.verification.status != VerificationStatus.VERIFIED:
+            raise ValueError("Cannot approve remediation for an unverified root cause.")
 
         approval = ApprovalRecord(
             id=f"appr_{uuid.uuid4().hex[:8]}",
