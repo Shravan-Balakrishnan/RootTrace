@@ -7,3 +7,6 @@ incident_memory.json
 node_modules/
 frontend/node_modules/
 *.db
+live_audit_records.json
+workspaces/*
+!workspaces/.gitkeep

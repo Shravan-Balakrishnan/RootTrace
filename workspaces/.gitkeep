@@ -1,0 +1,2 @@
+# Disposable runtime scratch directory for isolated patch application and validation.
+# Subdirectories created here are discarded and excluded from version control.

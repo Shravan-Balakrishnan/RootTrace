@@ -10,10 +10,12 @@ import { SafetyApprovalCard } from './components/SafetyApprovalCard';
 import { RecoveryVerificationCard } from './components/RecoveryVerificationCard';
 import { EvidenceModal } from './components/EvidenceModal';
 import { PostmortemModal } from './components/PostmortemModal';
+import { LiveDebugConsole } from './pages/LiveDebugConsole';
 import { Incident, SystemStatus, ScenarioMeta, EvidenceRecord } from './types/incident';
-import { AlertCircle, Activity, ShieldCheck, Database, Clock, Layers } from 'lucide-react';
+import { AlertCircle, Activity, ShieldCheck, Database, Clock, Layers, Zap, Sliders } from 'lucide-react';
 
 export const App: React.FC = () => {
+  const [activeMode, setActiveMode] = useState<'live' | 'simulator'>('live');
   const [incident, setIncident] = useState<Incident | null>(null);
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
@@ -175,30 +177,112 @@ export const App: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-      <Header
-        scenarios={scenarios}
-        currentScenario={currentScenario}
-        onSelectScenario={handleSelectScenario}
-        systemStatus={systemStatus}
-        incident={incident}
-        isStreaming={isStreaming}
-        onAutoInvestigate={handleAutoInvestigate}
-        onStepPhase={handleStepPhase}
-        onResetInvestigation={handleResetInvestigation}
-        onTogglePause={handleTogglePause}
-      />
-
-      <LifecycleStepper currentPhase={incident?.current_phase || 'TRIGGERED'} />
-
-      {/* 3-Column Layout */}
-      <main style={{
-        display: 'grid',
-        gridTemplateColumns: '380px 1fr 420px',
-        gap: '16px',
-        padding: '16px 20px',
-        height: 'calc(100vh - 105px)',
-        overflow: 'hidden'
+      {/* Top Experience Switcher Bar */}
+      <header style={{
+        background: '#090d16',
+        borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+        padding: '8px 20px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        zIndex: 50
       }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{
+            background: 'linear-gradient(135deg, #0284c7 0%, #6366f1 100%)',
+            padding: '4px 8px',
+            borderRadius: '4px',
+            fontSize: '11px',
+            fontWeight: 800,
+            color: '#fff',
+            letterSpacing: '0.05em'
+          }}>
+            ROOTTRACE
+          </div>
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#f8fafc' }}>
+            Live Debugging & Verified Code Repair
+          </span>
+        </div>
+
+        {/* Reversible Experience Mode Toggle */}
+        <div style={{
+          display: 'flex',
+          background: 'rgba(255, 255, 255, 0.05)',
+          padding: '3px',
+          borderRadius: '6px',
+          border: '1px solid rgba(255, 255, 255, 0.1)'
+        }}>
+          <button
+            onClick={() => setActiveMode('live')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '5px 12px',
+              borderRadius: '4px',
+              border: 'none',
+              fontSize: '11px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              background: activeMode === 'live' ? '#0284c7' : 'transparent',
+              color: activeMode === 'live' ? '#fff' : '#94a3b8'
+            }}
+          >
+            <Zap size={13} /> Live Debug Console (Active)
+          </button>
+          <button
+            onClick={() => setActiveMode('simulator')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '5px 12px',
+              borderRadius: '4px',
+              border: 'none',
+              fontSize: '11px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              background: activeMode === 'simulator' ? '#4f46e5' : 'transparent',
+              color: activeMode === 'simulator' ? '#fff' : '#94a3b8'
+            }}
+          >
+            <Sliders size={13} /> Simulator (Legacy Fallback)
+          </button>
+        </div>
+      </header>
+
+      {/* Primary Experience: Live Debug Console */}
+      {activeMode === 'live' ? (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+          <LiveDebugConsole />
+        </div>
+      ) : (
+        /* Reversible Fallback: Legacy Incident Simulator */
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+          <Header
+            scenarios={scenarios}
+            currentScenario={currentScenario}
+            onSelectScenario={handleSelectScenario}
+            systemStatus={systemStatus}
+            incident={incident}
+            isStreaming={isStreaming}
+            onAutoInvestigate={handleAutoInvestigate}
+            onStepPhase={handleStepPhase}
+            onResetInvestigation={handleResetInvestigation}
+            onTogglePause={handleTogglePause}
+          />
+
+          <LifecycleStepper currentPhase={incident?.current_phase || 'TRIGGERED'} />
+
+          {/* 3-Column Layout */}
+          <main style={{
+            display: 'grid',
+            gridTemplateColumns: '380px 1fr 420px',
+            gap: '16px',
+            padding: '16px 20px',
+            height: 'calc(100vh - 150px)',
+            overflow: 'hidden'
+          }}>
         {/* Left Column: Overview, Hypotheses & Decision Trace */}
         <section style={{
           background: 'rgba(15, 23, 42, 0.75)',
@@ -399,6 +483,8 @@ export const App: React.FC = () => {
         postmortem={incident?.postmortem}
         onClose={() => setIsPostmortemOpen(false)}
       />
+        </div>
+      )}
     </div>
   );
 };

@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse
 import os
 
 from .api.routes import router as api_router
+from .api.live_routes import router as live_router
 
 app = FastAPI(
     title="RootTrace — Autonomous Incident Investigation & Recovery",
@@ -25,6 +26,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+app.include_router(live_router)
 
 # Mount frontend dist (React app) or fallback to static
 dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend", "dist"))
