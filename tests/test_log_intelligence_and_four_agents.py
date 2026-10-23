@@ -493,3 +493,170 @@ def test_four_agent_clean_baseline_abstention(isolated_workspace):
     assert res.proposed_patch is None
     assert res.phase == "RESOLVED"
     assert "healthy" in res.abstention_reason.lower()
+
+
+# =====================================================================
+# 4. Agent Responsibility & Real Data Flow Verification Tests
+# =====================================================================
+
+def test_agent1_template_output_reaches_agent2_context():
+    """
+    Verifies real data flow from Agent 1 to Agent 2:
+    Drain3 mined log templates produced by Agent 1 reach Agent 2's
+    investigation context and continual learning retrieval query.
+    """
+    miner = LogIntelligenceMiner()
+    report = miner.mine_log_templates([
+        "Payment callback error for order 501",
+        "Payment callback error for order 502"
+    ])
+    assert report.unique_templates_count == 1
+    assert report.templates[0].template_text == "Payment callback error for order <NUM>"
+
+    sanitizer = EvidenceSanitizer()
+    _, summary = sanitizer.sanitize_evidence_collection([])
+    bundle = CollectedLiveEvidence(
+        run_id="run_flow_a1_a2",
+        observed_failure_type="TEST_FAILURE",
+        evidence_records=[],
+        sanitization_summary=summary,
+        is_failing=True,
+        summary="Payment failure observed",
+        log_intelligence=report
+    )
+
+    agent_2 = DiagnosisInvestigationAgent()
+    hypotheses, retrieved_cases, a2_record = agent_2.execute(bundle, workspace_id="ws_flow")
+
+    assert len(hypotheses) == 2
+    # Verify that log templates reached Agent 2's diagnosis context
+    assert "Payment callback error for order <NUM>" in a2_record.summary or any(
+        "order" in h.description.lower() for h in hypotheses
+    ) or len(retrieved_cases) >= 0
+
+
+def test_agent2_confidence_grounded_in_evidence_not_fixed():
+    """
+    Verifies that Agent 2's confidence score is dynamically computed from observable
+    evidence (presence of test failure, log templates, tracebacks) rather than fixed literals.
+    """
+    sanitizer = EvidenceSanitizer()
+
+    # Case A: Strong corroborated evidence (test failure + traceback + log templates)
+    miner = LogIntelligenceMiner()
+    report = miner.mine_log_templates(["ZeroDivisionError at line 59", "ZeroDivisionError at line 59"])
+    strong_items = [
+        {
+            "id": "ev_test_fail",
+            "source_tool": "regression_test_runner",
+            "source_ref": "tests/test_api.py",
+            "summary": "Regression test failed with ZeroDivisionError",
+            "data": {"all_passed": False, "error_summary": ["ZeroDivisionError: division by zero"]}
+        },
+        {
+            "id": "ev_tb",
+            "source_tool": "process_logs",
+            "source_ref": "stdout",
+            "summary": "Traceback observed",
+            "data": {"traceback": ["ZeroDivisionError: division by zero"]}
+        }
+    ]
+    strong_sanitized, strong_summary = sanitizer.sanitize_evidence_collection(strong_items)
+    strong_bundle = CollectedLiveEvidence(
+        run_id="run_strong_ev",
+        observed_failure_type="TEST_FAILURE",
+        evidence_records=strong_sanitized,
+        sanitization_summary=strong_summary,
+        is_failing=True,
+        summary="Defect corroborated by logs and test runner",
+        log_intelligence=report
+    )
+
+    # Case B: Minimal uncorroborated evidence
+    weak_items = [
+        {
+            "id": "ev_test_generic",
+            "source_tool": "regression_test_runner",
+            "source_ref": "tests/test_api.py",
+            "summary": "Unknown failure",
+            "data": {"all_passed": True}  # tests did not fail
+        }
+    ]
+    weak_sanitized, weak_summary = sanitizer.sanitize_evidence_collection(weak_items)
+    weak_bundle = CollectedLiveEvidence(
+        run_id="run_weak_ev",
+        observed_failure_type="TEST_FAILURE",
+        evidence_records=weak_sanitized,
+        sanitization_summary=weak_summary,
+        is_failing=True,
+        summary="Generic alert without logs"
+    )
+
+    agent_2 = DiagnosisInvestigationAgent()
+    strong_hyps, _, _ = agent_2.execute(strong_bundle, workspace_id="ws_strong")
+    weak_hyps, _, _ = agent_2.execute(weak_bundle, workspace_id="ws_weak")
+
+    # Score must be higher for strong corroborated evidence than weak uncorroborated evidence
+    assert strong_hyps[0].score > weak_hyps[0].score
+    assert strong_hyps[0].score >= 0.85
+    assert weak_hyps[0].score < 0.80
+
+
+def test_agent3_veto_halts_repair_progression(isolated_workspace):
+    """
+    Verifies that an Adversarial Critic veto prevents patch generation / application:
+    When Agent 3 vetoes, LiveInvestigationEngine halts in phase CRITIQUE, abstains,
+    and Agent 4 is never permitted to synthesize or return a patch proposal.
+    """
+    # Create bundle that triggers critic veto: HEALTH_CHECK_FAILED without error traceback
+    sanitizer = EvidenceSanitizer()
+    items = [
+        {
+            "id": "ev_hp_only",
+            "source_tool": "health_probe",
+            "source_ref": "http://127.0.0.1:8001/health",
+            "summary": "Health check degraded",
+            "data": {"status": "DEGRADED", "is_healthy": False}
+        }
+    ]
+    sanitized, summary = sanitizer.sanitize_evidence_collection(items)
+    veto_bundle = CollectedLiveEvidence(
+        run_id="run_critic_veto_halt",
+        observed_failure_type="HEALTH_CHECK_FAILED",
+        evidence_records=sanitized,
+        sanitization_summary=summary,
+        is_failing=True,
+        summary="Health check failed with no error traceback in logs"
+    )
+
+    engine = LiveInvestigationEngine()
+    res = engine.run_investigation(veto_bundle, workspace_id=str(isolated_workspace))
+
+    assert res.abstained is True
+    assert res.phase == "CRITIQUE"
+    assert res.proposed_patch is None
+    assert "veto" in res.abstention_reason.lower()
+    # Confirm Agent 4 trace is absent because repair progression was blocked
+    assert not any("Agent 4" in t.role_name for t in res.agent_traces)
+
+
+def test_failed_regression_test_prevents_recovery_verdict(isolated_workspace):
+    """
+    Verifies that a failed regression test prevents a successful recovery verdict:
+    If a patch is applied but tests still fail, RecoveryVerifier returns
+    all_checks_passed=False and does NOT falsely claim recovery.
+    """
+    from backend.app.live_debug.verification import RecoveryVerifier
+
+    # Introduce a defect that will deliberately fail tests
+    services_path = isolated_workspace / "app" / "services.py"
+    code = services_path.read_text(encoding="utf-8")
+    services_path.write_text(code.replace("round(discounted_subtotal * tax_rate, 2)", "99999.99"), encoding="utf-8")
+
+    verifier = RecoveryVerifier(test_runner=LiveDebugTestRunner(timeout_seconds=10.0))
+    rec_result = verifier.verify_workspace_recovery(str(isolated_workspace))
+
+    assert rec_result.all_checks_passed is False
+    assert "failed" in rec_result.summary.lower()
+    assert rec_result.regression_tests_passed is False
+

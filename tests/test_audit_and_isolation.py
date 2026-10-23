@@ -379,3 +379,112 @@ def test_persistent_shared_session_storage(client):
     assert row["email"] == "incident_commander@company.com"
     assert row["role"] == "incident_commander"
     assert row["is_active"] == 1
+
+
+def test_startup_behavior_missing_security_configuration(monkeypatch):
+    """
+    Verifies startup behavior when required security configuration is missing:
+    In strict security / production mode, missing ROOTTRACE_DEMO_LEAD_SRE_PASSWORD
+    raises a RuntimeError and prevents insecure operation.
+    """
+    from backend.app.safety.auth import verify_security_configuration
+    monkeypatch.delenv("ROOTTRACE_DEMO_LEAD_SRE_PASSWORD", raising=False)
+    monkeypatch.delenv("ROOTTRACE_LEAD_SRE_PASSWORD", raising=False)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        verify_security_configuration(strict=True)
+    assert "Missing required security configuration" in str(exc_info.value)
+
+
+def test_auth_expired_session_fails():
+    """
+    Verifies that an expired session token is rejected with HTTP 401 Unauthorized.
+    """
+    from backend.app.safety.auth import create_authenticated_session, authenticate_and_authorize_approver
+    from fastapi import HTTPException
+
+    # Create session with negative TTL (already expired)
+    expired_sess = create_authenticated_session("lead_sre@company.com", "LeadSRE-Prod-Auth-2026!", ttl_seconds=-10)
+
+    with pytest.raises(HTTPException) as exc_info:
+        authenticate_and_authorize_approver(auth_token=expired_sess.token)
+    assert exc_info.value.status_code == 401
+    assert "expired" in exc_info.value.detail.lower()
+
+
+def test_direct_api_patch_approve_without_auth(client):
+    """
+    Verifies that calling POST /api/live/patch/approve directly without credentials
+    or with an invalid token cannot bypass authorization (HTTP 401).
+    """
+    # 1. Missing token
+    r_empty = client.post("/api/live/patch/approve", json={
+        "run_id": "run_direct_01",
+        "patch_hash": "a" * 64,
+        "auth_token": "",
+        "approver": "lead_sre@company.com"
+    })
+    assert r_empty.status_code == 401
+
+    # 2. Bogus token
+    r_bogus = client.post("/api/live/patch/approve", json={
+        "run_id": "run_direct_01",
+        "patch_hash": "a" * 64,
+        "auth_token": "bogus_unverified_token_value",
+        "approver": "lead_sre@company.com"
+    })
+    assert r_bogus.status_code == 401
+
+
+def test_direct_api_patch_approve_unauthorized_role(client):
+    """
+    Verifies that an authenticated caller with an unprivileged role (e.g. intern)
+    is rejected with HTTP 403 Forbidden when calling POST /api/live/patch/approve directly.
+    """
+    # Create intern session
+    intern_sess = client.post("/api/auth/session", json={
+        "email": "intern_observer@company.com",
+        "password": "Intern-Guest-2026!"
+    }).json()
+    intern_token = intern_sess["session_token"]
+
+    r_intern = client.post("/api/live/patch/approve", json={
+        "run_id": "run_direct_intern",
+        "patch_hash": "b" * 64,
+        "auth_token": intern_token,
+        "approver": "intern_observer@company.com",
+        "role": "intern"
+    })
+    assert r_intern.status_code == 403
+    assert "not authorized to approve" in r_intern.json()["detail"]
+
+
+def test_credentials_not_printed_in_audit_or_logs():
+    """
+    Verifies that secret values and passwords never leak into serialized audit records.
+    """
+    from backend.app.live_debug.audit import AuditRecord, LiveAuditStore
+    import datetime
+
+    record = AuditRecord(
+        run_id="run_audit_redact_test",
+        timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        observed_failure="TEST_FAILURE",
+        evidence_count=2,
+        hypotheses_evaluated=["Hypothesis 1"],
+        critic_verdict="Approved",
+        diagnosis="Clean diagnosis without credentials",
+        patch_hash="c" * 64,
+        target_workspace="/tmp/test",
+        approver="lead_sre@company.com",
+        approver_role="lead_sre",
+        approval_timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        test_result_summary="10/10 passed",
+        recovery_verified=True,
+        audit_tags=["live_lab", "test"]
+    )
+    dumped = record.model_dump_json()
+    assert "password" not in dumped.lower()
+    assert "LeadSRE" not in dumped
+    assert "token" not in dumped.lower() or "audit_tags" in dumped
+

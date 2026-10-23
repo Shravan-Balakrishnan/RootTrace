@@ -166,32 +166,57 @@ class DiagnosisInvestigationAgent:
 
         # Competing Hypothesis 1 (Leading: Code Defect)
         h1_id = f"HYP-{uuid.uuid4().hex[:4].upper()}"
+        h1_supporting = [ev.id for ev in collected.evidence_records if ev.source_tool in ("regression_test_runner", "process_logs", "log_intelligence")]
+        total_ev = max(1, len(collected.evidence_records))
+        evidence_ratio = len(h1_supporting) / total_ev
+
+        has_test_failure = any(ev.source_tool == "regression_test_runner" and not ev.data.get("all_passed", True) for ev in collected.evidence_records)
+        has_log_templates = bool(collected.log_intelligence and collected.log_intelligence.templates)
+        has_traceback = any(ev.source_tool == "process_logs" and ev.data.get("traceback") for ev in collected.evidence_records)
+
+        computed_h1_score = 0.45 + (0.25 * evidence_ratio)
+        if has_test_failure:
+            computed_h1_score += 0.15
+        if has_log_templates:
+            computed_h1_score += 0.05
+        if has_traceback:
+            computed_h1_score += 0.05
+        h1_score = round(min(0.96, max(0.40, computed_h1_score)), 2)
+
         h1 = Hypothesis(
             id=h1_id,
             title="Service Logic Calculation or Parameter Handling Defect",
             description=f"A code defect in live-lab/app/services.py or main.py caused: {error_context[:100]}",
-            supporting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool in ("regression_test_runner", "process_logs", "log_intelligence")],
+            supporting_evidence_ids=h1_supporting,
             contradicting_evidence_ids=[],
             expected_evidence=["Regression test failure output", "Exception traceback", "Recurring log templates"],
             evidence_still_needed=[],
             falsification_criteria="All regression tests pass without calculation or parameter errors.",
             status=HypothesisStatus.SUPPORTED,
-            score=0.88
+            score=h1_score
         )
 
         # Competing Hypothesis 2 (Alternative: Transient Socket / Port Contention)
         h2_id = f"HYP-{uuid.uuid4().hex[:4].upper()}"
+        h2_supporting = [ev.id for ev in collected.evidence_records if ev.source_tool == "health_probe" and not ev.data.get("is_healthy", True)]
+        h2_contradicting = [ev.id for ev in collected.evidence_records if ev.source_tool in ("regression_test_runner", "process_logs") or (ev.source_tool == "health_probe" and ev.data.get("is_healthy", True))]
+
+        computed_h2_score = 0.40 - (0.25 * evidence_ratio)
+        if any(ev.source_tool == "health_probe" and ev.data.get("is_healthy", True) for ev in collected.evidence_records):
+            computed_h2_score -= 0.15
+        h2_score = round(max(0.05, min(0.45, computed_h2_score)), 2)
+
         h2 = Hypothesis(
             id=h2_id,
             title="Transient Process or Network Binding Failure",
             description="The microservice was temporarily unreachable due to network port contention or OS resource starvation.",
-            supporting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool == "health_probe"],
-            contradicting_evidence_ids=[ev.id for ev in collected.evidence_records if ev.source_tool in ("regression_test_runner", "process_logs")],
+            supporting_evidence_ids=h2_supporting,
+            contradicting_evidence_ids=h2_contradicting,
             expected_evidence=["OS socket binding error in process logs"],
             evidence_still_needed=["Socket error logs"],
             falsification_criteria="Service binds and responds on configured port without error.",
             status=HypothesisStatus.WEAKENED,
-            score=0.22
+            score=h2_score
         )
 
         hypotheses = [h1, h2]

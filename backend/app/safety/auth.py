@@ -28,45 +28,96 @@ class SessionRecord(BaseModel):
     expires_at: datetime.datetime
 
 
-# Organization Directory defining authorized SRE personnel, their verified roles, and salted password hashes
-# Salted PBKDF2-HMAC-SHA256 (100,000 iterations)
-ORGANIZATION_DIRECTORY: Dict[str, Dict[str, str]] = {
+# Dynamic Organization Directory defining authorized SRE personnel, their verified roles, and salted password hashes
+# Salted PBKDF2-HMAC-SHA256 (100,000 iterations) derived at startup from environment variables
+
+def get_operator_credentials() -> Dict[str, str]:
+    """
+    Retrieves demo operator credentials from environment variables.
+    In local development / demo testbeds, falls back to default demo credentials
+    if environment variables are not set.
+    """
+    return {
+        "lead_sre@company.com": os.getenv("ROOTTRACE_DEMO_LEAD_SRE_PASSWORD", os.getenv("ROOTTRACE_LEAD_SRE_PASSWORD", "LeadSRE-Prod-Auth-2026!")),
+        "incident_commander@company.com": os.getenv("ROOTTRACE_DEMO_CMD_PASSWORD", os.getenv("ROOTTRACE_CMD_PASSWORD", "Commander-SecOps-2026!")),
+        "oncall_sre@company.com": os.getenv("ROOTTRACE_DEMO_ONCALL_PASSWORD", os.getenv("ROOTTRACE_ONCALL_PASSWORD", "OnCall-Incident-2026!")),
+        "staff_sre@company.com": os.getenv("ROOTTRACE_DEMO_STAFF_PASSWORD", os.getenv("ROOTTRACE_STAFF_PASSWORD", "StaffSRE-Recovery-2026!")),
+        "intern_observer@company.com": os.getenv("ROOTTRACE_DEMO_INTERN_PASSWORD", os.getenv("ROOTTRACE_INTERN_PASSWORD", "Intern-Guest-2026!")),
+    }
+
+
+def verify_security_configuration(strict: bool = False) -> bool:
+    """
+    Validates that required security credentials are provided in the environment.
+    When strict=True or in production/strict mode, raises RuntimeError if required secrets are missing.
+    """
+    is_strict = strict or os.getenv("ROOTTRACE_STRICT_AUTH", "").lower() in ("1", "true") or os.getenv("ENV") == "production"
+    if is_strict:
+        lead_pwd = os.getenv("ROOTTRACE_DEMO_LEAD_SRE_PASSWORD") or os.getenv("ROOTTRACE_LEAD_SRE_PASSWORD")
+        if not lead_pwd:
+            raise RuntimeError("Missing required security configuration: ROOTTRACE_DEMO_LEAD_SRE_PASSWORD must be configured in environment.")
+    return True
+
+
+USER_METADATA_DEFINITIONS = {
     "lead_sre@company.com": {
         "user_id": "usr_sre_01",
         "name": "Lead SRE (Primary)",
         "role": "lead_sre",
-        "salt": "1e16402c9e36dc858011f2cecd2339b2",
-        "password_hash": "c8e0af0cac3fe770a0ad1bc9fed47c60e116365d6a780fd75c93a70ca19077fa"  # LeadSRE-Prod-Auth-2026!
+        "salt": "1e16402c9e36dc858011f2cecd2339b2"
     },
     "incident_commander@company.com": {
         "user_id": "usr_cmd_02",
         "name": "Incident Commander",
         "role": "incident_commander",
-        "salt": "5f978068a4d8e837b05d0616a3ecac6d",
-        "password_hash": "be4a7c46556b0706084aad577d1f0d1d12a30951fb92ec32dc1f19c618d751ea"  # Commander-SecOps-2026!
+        "salt": "5f978068a4d8e837b05d0616a3ecac6d"
     },
     "oncall_sre@company.com": {
         "user_id": "usr_oncall_03",
         "name": "On-Call SRE",
         "role": "oncall_sre",
-        "salt": "511206ee106f5242362b10d509398201",
-        "password_hash": "d13368987149c2c81bad8d6ea6dd8be3c2213eef30c30deaa94a1c37985949b5"  # OnCall-Incident-2026!
+        "salt": "511206ee106f5242362b10d509398201"
     },
     "staff_sre@company.com": {
         "user_id": "usr_staff_04",
         "name": "Staff SRE",
         "role": "staff_sre",
-        "salt": "c0c73847b3ce6bedbf8145052c894f33",
-        "password_hash": "13496c51ca1b42e326114a16dfe487d3ee8d8bb88ab474c6ee50a63619fc4e7c"  # StaffSRE-Recovery-2026!
+        "salt": "c0c73847b3ce6bedbf8145052c894f33"
     },
     "intern_observer@company.com": {
         "user_id": "usr_intern_99",
         "name": "Junior SRE Intern",
         "role": "intern",
-        "salt": "0c7b3e100735c7a613770877c081d1d9",
-        "password_hash": "30bc90894083564864413eb6e9f9a248f19eb001863a9801f6bbd2f2159264da"  # Intern-Guest-2026!
+        "salt": "0c7b3e100735c7a613770877c081d1d9"
     }
 }
+
+
+def _build_organization_directory() -> Dict[str, Dict[str, str]]:
+    creds = get_operator_credentials()
+    directory = {}
+    for email, meta in USER_METADATA_DEFINITIONS.items():
+        pwd = creds.get(email, "")
+        salt_bytes = bytes.fromhex(meta["salt"])
+        calc_hash = hashlib.pbkdf2_hmac("sha256", pwd.encode("utf-8"), salt_bytes, 100000).hex()
+        directory[email] = {
+            "user_id": meta["user_id"],
+            "name": meta["name"],
+            "role": meta["role"],
+            "salt": meta["salt"],
+            "password_hash": calc_hash
+        }
+    return directory
+
+
+ORGANIZATION_DIRECTORY: Dict[str, Dict[str, str]] = _build_organization_directory()
+
+
+def reload_organization_directory() -> None:
+    """Reloads the organization directory and password hashes from current environment variables."""
+    global ORGANIZATION_DIRECTORY
+    ORGANIZATION_DIRECTORY = _build_organization_directory()
+
 
 AUTHORIZED_APPROVER_ROLES: Set[str] = {
     "incident_commander",
@@ -189,7 +240,8 @@ def create_authenticated_session(email: str, password: Optional[str] = None, ttl
 def authenticate_and_authorize_approver(
     auth_token: Optional[str] = None,
     client_claimed_approver: Optional[str] = None,
-    client_claimed_role: Optional[str] = None
+    client_claimed_role: Optional[str] = None,
+    required_role: Optional[str] = None
 ) -> UserPrincipal:
     """
     Validates a session token against the persistent shared database.
@@ -197,6 +249,7 @@ def authenticate_and_authorize_approver(
     Rejects missing, expired, or invalid tokens with 401 Unauthorized.
     Rejects unauthorized roles with 403 Forbidden.
     Rejects client attempts to spoof identity or elevate roles with 403 Forbidden.
+    Optionally enforces an exact required_role (e.g. 'lead_sre').
     """
     if not auth_token or not auth_token.strip():
         raise HTTPException(
@@ -249,6 +302,15 @@ def authenticate_and_authorize_approver(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Principal '{principal.email}' with role '{principal.role}' is not authorized to approve consequential remediation actions. Authorized roles: {sorted(list(AUTHORIZED_APPROVER_ROLES))}"
         )
+
+    # Enforce specific required role if specified
+    if required_role and required_role.strip():
+        norm_req = required_role.strip().lower().replace(" ", "_")
+        if normalized_role != norm_req:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Authorization failed: Action specifically requires '{required_role}' role. Current session grants '{principal.role}'."
+            )
 
     # Defend against spoofing
     if client_claimed_approver and client_claimed_approver.strip():

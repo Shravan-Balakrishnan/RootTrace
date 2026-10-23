@@ -11,13 +11,6 @@ interface SafetyApprovalCardProps {
   onReject: () => Promise<void>;
 }
 
-const DEFAULT_PASSWORDS: Record<string, string> = {
-  'lead_sre@company.com': 'LeadSRE-Prod-Auth-2026!',
-  'incident_commander@company.com': 'Commander-SecOps-2026!',
-  'oncall_sre@company.com': 'OnCall-Incident-2026!',
-  'intern_observer@company.com': 'Intern-Guest-2026!'
-};
-
 export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   proposal,
   policyDecision,
@@ -27,7 +20,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onReject
 }) => {
   const [selectedEmail, setSelectedEmail] = useState('lead_sre@company.com');
-  const [password, setPassword] = useState(DEFAULT_PASSWORDS['lead_sre@company.com']);
+  const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -117,7 +110,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
                 onChange={(e) => {
                   const newEmail = e.target.value;
                   setSelectedEmail(newEmail);
-                  setPassword(DEFAULT_PASSWORDS[newEmail] || '');
+                  setPassword('');
                   setErrorMessage(null);
                 }}
                 style={{

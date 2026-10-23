@@ -9,13 +9,6 @@ interface Props {
   isApplying: boolean;
 }
 
-const DEFAULT_PASSWORDS: Record<string, string> = {
-  'lead_sre@company.com': 'LeadSRE-Prod-Auth-2026!',
-  'incident_commander@company.com': 'Commander-SecOps-2026!',
-  'oncall_sre@company.com': 'OnCall-Incident-2026!',
-  'intern_observer@company.com': 'Intern-Guest-2026!'
-};
-
 export const PatchReviewModal: React.FC<Props> = ({
   proposal,
   onApprove,
@@ -23,7 +16,7 @@ export const PatchReviewModal: React.FC<Props> = ({
   isApplying
 }) => {
   const [selectedEmail, setSelectedEmail] = useState('lead_sre@company.com');
-  const [password, setPassword] = useState(DEFAULT_PASSWORDS['lead_sre@company.com']);
+  const [password, setPassword] = useState('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const handleApprove = async () => {
@@ -131,7 +124,7 @@ export const PatchReviewModal: React.FC<Props> = ({
             onChange={(e) => {
               const email = e.target.value;
               setSelectedEmail(email);
-              setPassword(DEFAULT_PASSWORDS[email] || '');
+              setPassword('');
               setErrorMessage(null);
             }}
             style={{
@@ -156,7 +149,11 @@ export const PatchReviewModal: React.FC<Props> = ({
           <input
             type="password"
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setErrorMessage(null);
+            }}
+            placeholder="Enter SRE password"
             style={{
               flex: 1,
               background: '#090d16',
