@@ -19,14 +19,16 @@ class ScenarioSelectRequest(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
-    approver: str
-    role: str = "oncall_sre"
     auth_token: Optional[str] = None
+    approver: Optional[str] = None
+    role: Optional[str] = None
     comment: Optional[str] = None
 
     @field_validator("approver")
     @classmethod
-    def validate_approver(cls, v: str) -> str:
+    def validate_approver(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
         if not isinstance(v, str):
             raise ValueError("Approver identity must be a string.")
         trimmed = v.strip()
@@ -290,21 +292,47 @@ def invoke_tool(req: ToolInvocationRequest):
     }
 
 
+@router.get("/auth/principals")
+def list_authenticated_principals():
+    """List active server-side verified principals for operator session selection."""
+    from ..safety.auth import VERIFIED_PRINCIPALS, AUTHORIZED_APPROVER_ROLES
+    return [
+        {
+            "token": token,
+            "email": p.email,
+            "name": p.name,
+            "role": p.role,
+            "is_authorized": p.role.lower().replace(" ", "_") in AUTHORIZED_APPROVER_ROLES
+        }
+        for token, p in VERIFIED_PRINCIPALS.items()
+    ]
+
+
 @router.post("/remediation/approve")
 def approve_remediation(req: ApprovalRequest):
-    # Enforce role-based authorization for consequential actions
-    normalized_role = req.role.strip().lower().replace(" ", "_")
-    if normalized_role not in AUTHORIZED_APPROVER_ROLES:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Role '{req.role}' is not authorized to approve consequential remediation actions. Authorized roles: {sorted(list(AUTHORIZED_APPROVER_ROLES))}"
-        )
+    from ..safety.auth import authenticate_and_authorize_approver
+
+    # Server-verified identity: token is mandatory; identity and role are derived strictly on the server
+    principal = authenticate_and_authorize_approver(
+        auth_token=req.auth_token,
+        client_claimed_approver=req.approver,
+        client_claimed_role=req.role
+    )
 
     try:
-        orchestrator.approve_remediation(approver=req.approver, comment=req.comment, role=req.role)
+        orchestrator.approve_remediation(
+            approver=principal.email,
+            comment=req.comment,
+            role=principal.role
+        )
         return {
             "success": True,
             "message": "Remediation executed and verified.",
+            "verified_principal": {
+                "email": principal.email,
+                "role": principal.role,
+                "name": principal.name
+            },
             "incident": orchestrator.incident.model_dump()
         }
     except Exception as e:

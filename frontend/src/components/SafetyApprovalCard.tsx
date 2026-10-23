@@ -7,7 +7,7 @@ interface SafetyApprovalCardProps {
   policyDecision?: PolicyDecision;
   currentPhase: InvestigationPhase;
   executionStatus: string;
-  onApprove: (approver: string, comment: string, role?: string) => Promise<void>;
+  onApprove: (authToken: string, comment: string) => Promise<void>;
   onReject: () => Promise<void>;
 }
 
@@ -19,8 +19,8 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onApprove,
   onReject
 }) => {
-  const [approver, setApprover] = useState('');
-  const [role, setRole] = useState('oncall_sre');
+  const [authToken, setAuthToken] = useState('sre_token_lead');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!proposal) return null;
@@ -28,10 +28,12 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   const isAwaitingApproval = currentPhase === 'AWAITING_APPROVAL';
 
   const handleApprove = async () => {
-    if (!approver.trim()) return;
     setIsSubmitting(true);
+    setErrorMessage(null);
     try {
-      await onApprove(approver.trim(), "Operator authorized rollback and callback replay in simulator", role);
+      await onApprove(authToken, "Operator authorized rollback and callback replay in simulator");
+    } catch (err: any) {
+      setErrorMessage(err?.message || "Approval authorization failed.");
     } finally {
       setIsSubmitting(false);
     }
@@ -89,72 +91,74 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
       {isAwaitingApproval ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
           <div style={{ display: 'flex', gap: '8px', fontSize: '11px', color: '#cbd5e1' }}>
-            <div style={{ flex: 2, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>Approver:</span>
-              <input
-                type="text"
-                value={approver}
-                onChange={(e) => setApprover(e.target.value)}
-                placeholder="e.g. lead_sre@company.com (required)"
-                style={{
-                  flex: 1,
-                  background: '#090d16',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#fff',
-                  padding: '4px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  fontFamily: 'var(--font-mono)'
-                }}
-              />
-            </div>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>Role:</span>
+              <span style={{ fontWeight: 600 }}>Active Verified Session:</span>
               <select
-                value={role}
-                onChange={(e) => setRole(e.target.value)}
+                value={authToken}
+                onChange={(e) => {
+                  setAuthToken(e.target.value);
+                  setErrorMessage(null);
+                }}
                 style={{
                   flex: 1,
                   background: '#090d16',
-                  border: '1px solid rgba(255, 255, 255, 0.15)',
-                  color: '#fbbf24',
-                  padding: '4px 6px',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  color: authToken === 'guest_token_unauth' ? '#f87171' : '#34d399',
+                  padding: '6px 8px',
                   borderRadius: '4px',
                   fontSize: '11px',
+                  fontWeight: 600,
                   fontFamily: 'var(--font-mono)'
                 }}
               >
-                <option value="oncall_sre">oncall_sre</option>
-                <option value="lead_sre">lead_sre</option>
-                <option value="incident_commander">incident_commander</option>
-                <option value="staff_sre">staff_sre</option>
+                <option value="sre_token_lead">lead_sre@company.com [Role: lead_sre — Authorized]</option>
+                <option value="sre_token_commander">incident_commander@company.com [Role: incident_commander — Authorized]</option>
+                <option value="sre_token_oncall">oncall_sre@company.com [Role: oncall_sre — Authorized]</option>
+                <option value="guest_token_unauth">intern_observer@company.com [Role: intern — 403 Forbidden]</option>
               </select>
             </div>
           </div>
 
+          {errorMessage && (
+            <div style={{
+              background: 'rgba(239, 68, 68, 0.15)',
+              border: '1px solid rgba(239, 68, 68, 0.4)',
+              color: '#f87171',
+              padding: '6px 10px',
+              borderRadius: '4px',
+              fontSize: '11px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px'
+            }}>
+              <AlertTriangle size={14} />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               onClick={handleApprove}
-              disabled={isSubmitting || !approver.trim()}
+              disabled={isSubmitting}
               style={{
                 flex: 1,
-                background: (isSubmitting || !approver.trim()) ? '#334155' : 'linear-gradient(135deg, #10b981, #059669)',
-                color: (isSubmitting || !approver.trim()) ? '#94a3b8' : '#fff',
+                background: isSubmitting ? '#334155' : (authToken === 'guest_token_unauth' ? '#7f1d1d' : 'linear-gradient(135deg, #10b981, #059669)'),
+                color: isSubmitting ? '#94a3b8' : '#fff',
                 border: 'none',
                 padding: '8px 14px',
                 borderRadius: '6px',
                 fontSize: '12px',
                 fontWeight: 600,
-                cursor: (isSubmitting || !approver.trim()) ? 'not-allowed' : 'pointer',
+                cursor: isSubmitting ? 'not-allowed' : 'pointer',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '6px',
-                boxShadow: (isSubmitting || !approver.trim()) ? 'none' : '0 0 12px rgba(16, 185, 129, 0.3)'
+                boxShadow: isSubmitting ? 'none' : (authToken === 'guest_token_unauth' ? '0 0 10px rgba(239, 68, 68, 0.3)' : '0 0 12px rgba(16, 185, 129, 0.3)')
               }}
             >
               <CheckCircle2 size={14} />
-              {isSubmitting ? 'Executing in Simulator...' : (!approver.trim() ? 'Enter Approver Identity to Authorize' : 'Approve & Execute Remediation')}
+              {isSubmitting ? 'Verifying Credentials...' : (authToken === 'guest_token_unauth' ? 'Test Unauthorized Approval (Expect 403 Block)' : 'Authorize & Execute Verified Remediation')}
             </button>
 
             <button

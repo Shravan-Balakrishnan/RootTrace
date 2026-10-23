@@ -151,13 +151,19 @@ export const App: React.FC = () => {
     setIncident(data.incident);
   };
 
-  const handleApproveRemediation = async (approver: string, comment: string, role: string = 'oncall_sre') => {
+  const handleApproveRemediation = async (authToken: string, comment: string) => {
     const res = await fetch('/api/remediation/approve', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approver, comment, role })
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+      },
+      body: JSON.stringify({ auth_token: authToken, comment })
     });
     const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Approval authorization failed.');
+    }
     setIncident(data.incident);
   };
 

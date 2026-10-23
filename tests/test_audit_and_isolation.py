@@ -49,21 +49,24 @@ def test_api_remediation_approval_workflow(client):
     r_reject = client.post("/api/remediation/reject")
     assert r_reject.status_code == 200
 
-    # Missing approver must fail validation (HTTP 422)
+    # Missing auth token must fail with HTTP 401 Unauthorized
     r_missing = client.post("/api/remediation/approve", json={})
-    assert r_missing.status_code == 422
+    assert r_missing.status_code == 401
 
     # Blank approver must fail validation (HTTP 400 or 422)
-    r_blank = client.post("/api/remediation/approve", json={"approver": "   "})
+    r_blank = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "   "})
     assert r_blank.status_code in [400, 422]
 
-    # Explicit approval
+    # Explicit approval with verified server token
     r_approve = client.post("/api/remediation/approve", json={
-        "approver": "lead_sre@company.com",
+        "auth_token": "sre_token_lead",
         "comment": "Rollback to v1.2.3 authorized"
     })
     assert r_approve.status_code == 200
-    inc_approved = r_approve.json()["incident"]
+    data = r_approve.json()
+    assert data["verified_principal"]["role"] == "lead_sre"
+    assert data["verified_principal"]["email"] == "lead_sre@company.com"
+    inc_approved = data["incident"]
 
     assert inc_approved["current_phase"] == "RESOLVED"
     assert inc_approved["recovery_result"] is not None
@@ -192,11 +195,11 @@ def test_approver_whitespace_rejection(client):
     client.post("/api/investigate/run")
 
     # Whitespace-only approver must be rejected
-    r_space = client.post("/api/remediation/approve", json={"approver": "   "})
+    r_space = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "   "})
     assert r_space.status_code in [400, 422]
 
     # Too short / invalid chars
-    r_short = client.post("/api/remediation/approve", json={"approver": "a"})
+    r_short = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "a"})
     assert r_short.status_code in [400, 422]
 
 
@@ -205,19 +208,56 @@ def test_approver_role_authorization_enforcement(client):
     client.post("/api/scenarios/select", json={"scenario_id": "callback_race"})
     client.post("/api/investigate/run")
 
-    # Unauthorized role must be rejected with HTTP 403 Forbidden
+    # Missing token -> 401
+    r_no_token = client.post("/api/remediation/approve", json={"role": "lead_sre"})
+    assert r_no_token.status_code == 401
+
+    # Invalid token -> 401
+    r_fake_token = client.post("/api/remediation/approve", json={"auth_token": "invalid_hacker_token"})
+    assert r_fake_token.status_code == 401
+
+    # Unauthorized role via token (guest intern) -> HTTP 403 Forbidden
     r_unauth = client.post("/api/remediation/approve", json={
-        "approver": "intern_user",
-        "role": "intern"
+        "auth_token": "guest_token_unauth"
     })
     assert r_unauth.status_code == 403
     assert "is not authorized to approve" in r_unauth.json()["detail"]
 
-    # Authorized role succeeds
+    # Role spoofing prevention: Client claims role="principal_sre" while using an oncall token -> HTTP 403 Forbidden
+    r_spoof = client.post("/api/remediation/approve", json={
+        "auth_token": "sre_token_oncall",
+        "role": "principal_sre"
+    })
+    assert r_spoof.status_code == 403
+    assert "Role mismatch" in r_spoof.json()["detail"]
+
+    # Identity spoofing prevention: Client claims to be lead_sre while using commander token -> HTTP 403 Forbidden
+    r_id_spoof = client.post("/api/remediation/approve", json={
+        "auth_token": "sre_token_commander",
+        "approver": "lead_sre@company.com"
+    })
+    assert r_id_spoof.status_code == 403
+    assert "Identity mismatch" in r_id_spoof.json()["detail"]
+
+    # Server-verified token authorization succeeds
     r_auth = client.post("/api/remediation/approve", json={
-        "approver": "lead_sre@company.com",
-        "role": "incident_commander"
+        "auth_token": "sre_token_commander"
     })
     assert r_auth.status_code == 200
-    assert r_auth.json()["success"] is True
-    assert r_auth.json()["incident"]["approval"]["role"] == "incident_commander"
+    data = r_auth.json()
+    assert data["success"] is True
+    assert data["verified_principal"]["role"] == "incident_commander"
+    assert data["verified_principal"]["email"] == "incident_commander@company.com"
+    assert data["incident"]["approval"]["role"] == "incident_commander"
+    assert data["incident"]["approval"]["approver"] == "incident_commander@company.com"
+
+
+def test_list_authenticated_principals_endpoint(client):
+    r = client.get("/api/auth/principals")
+    assert r.status_code == 200
+    principals = r.json()
+    assert len(principals) >= 4
+    tokens = [p["token"] for p in principals]
+    assert "sre_token_lead" in tokens
+    assert "sre_token_commander" in tokens
+    assert "guest_token_unauth" in tokens
