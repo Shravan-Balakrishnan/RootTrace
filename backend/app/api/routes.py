@@ -2,7 +2,8 @@
 FastAPI REST Routes for RootTrace API.
 """
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+import re
 from typing import Dict, Any, List, Optional
 from ..orchestrator.engine import Orchestrator
 from ..sandbox.scenarios import ALL_SCENARIOS
@@ -19,7 +20,23 @@ class ScenarioSelectRequest(BaseModel):
 
 class ApprovalRequest(BaseModel):
     approver: str
+    role: str = "oncall_sre"
+    auth_token: Optional[str] = None
     comment: Optional[str] = None
+
+    @field_validator("approver")
+    @classmethod
+    def validate_approver(cls, v: str) -> str:
+        if not isinstance(v, str):
+            raise ValueError("Approver identity must be a string.")
+        trimmed = v.strip()
+        if not trimmed:
+            raise ValueError("Approver identity cannot be blank or whitespace.")
+        if len(trimmed) < 3:
+            raise ValueError("Approver identity must be at least 3 characters long.")
+        if not re.match(r"^[a-zA-Z0-9_.\-+@]+$", trimmed):
+            raise ValueError("Approver identity contains invalid characters.")
+        return trimmed
 
 
 class ToolInvocationRequest(BaseModel):
@@ -162,31 +179,104 @@ def run_investigation():
     return {"message": f"Investigation loop reached phase '{inc.current_phase.value}'", "incident": inc.model_dump()}
 
 
+AUTHORIZED_APPROVER_ROLES = {
+    "incident_commander",
+    "oncall_sre",
+    "lead_sre",
+    "staff_sre",
+    "principal_sre"
+}
+
+
+def _validate_and_bind_arguments(tool_name: str, tool_fn: Any, args: Dict[str, Any]) -> Dict[str, Any]:
+    import inspect
+    import typing
+
+    sig = inspect.signature(tool_fn)
+    try:
+        bound = sig.bind(**args)
+        bound.apply_defaults()
+    except TypeError as e:
+        raise HTTPException(status_code=400, detail=f"Invalid arguments for tool '{tool_name}': {str(e)}")
+
+    def check_type(val: Any, expected: Any) -> bool:
+        if expected is inspect.Parameter.empty or val is None:
+            return True
+        origin = typing.get_origin(expected)
+        type_args = typing.get_args(expected)
+        if origin is typing.Union:
+            return any(check_type(val, t) for t in type_args)
+        if expected is int:
+            return isinstance(val, int) and not isinstance(val, bool)
+        if expected is str:
+            return isinstance(val, str)
+        if expected is float:
+            return isinstance(val, (int, float)) and not isinstance(val, bool)
+        if expected is bool:
+            return isinstance(val, bool)
+        if expected is list or origin is list:
+            return isinstance(val, list)
+        if expected is dict or origin is dict:
+            return isinstance(val, dict)
+        if isinstance(expected, type):
+            return isinstance(val, expected)
+        return True
+
+    for param_name, val in bound.arguments.items():
+        param = sig.parameters.get(param_name)
+        if param and param.annotation != inspect.Parameter.empty and val is not None:
+            if not check_type(val, param.annotation):
+                expected_name = getattr(param.annotation, "__name__", str(param.annotation))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid type for argument '{param_name}' on tool '{tool_name}': expected {expected_name}, got {type(val).__name__}."
+                )
+
+    return bound.arguments
+
+
 @router.post("/investigate/tool")
 def invoke_tool(req: ToolInvocationRequest):
     from ..llm.provider import ALLOWED_TOOLS
-    import inspect
 
-    # Restrict strictly to explicit allowlist of read-only investigative tools
+    # 1. Restrict strictly to explicit allowlist of read-only investigative tools
     if req.tool_name not in ALLOWED_TOOLS:
         raise HTTPException(
             status_code=400,
             detail=f"Tool '{req.tool_name}' is not in the allowed investigative tools set. Permitted tools: {sorted(list(ALLOWED_TOOLS))}"
         )
 
+    # 2. Block access to private/internal/dunder methods
+    if req.tool_name.startswith("_"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Access to private/internal method '{req.tool_name}' is prohibited."
+        )
+
     tool_fn = getattr(orchestrator.tools, req.tool_name, None)
-    if not tool_fn or not callable(tool_fn) or req.tool_name.startswith("_"):
+    if not tool_fn or not callable(tool_fn):
         raise HTTPException(status_code=400, detail=f"Tool '{req.tool_name}' is not executable.")
 
-    # Validate arguments against the tool callable signature before executing
-    try:
-        sig = inspect.signature(tool_fn)
-        sig.bind(**req.arguments)
-    except TypeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid arguments for tool '{req.tool_name}': {str(e)}")
+    # 3. Validate parameter names, required parameters, and runtime types
+    validated_args = _validate_and_bind_arguments(req.tool_name, tool_fn, req.arguments)
 
-    res = tool_fn(**req.arguments)
-    # Sync new evidence
+    # 4. Invoke tool and handle results
+    try:
+        res = tool_fn(**validated_args)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Tool '{req.tool_name}' execution failed: {str(e)}")
+
+    if isinstance(res, dict) and not res.get("success", True):
+        # Returned error response from tool implementation
+        return {
+            "tool": req.tool_name,
+            "status": "FAILED",
+            "error": res.get("error", "Tool execution reported failure"),
+            "result": res,
+            "incident": orchestrator.incident.model_dump()
+        }
+
+    # 5. Sync new evidence into incident model
     for eid in res.get("evidence_ids", []):
         orchestrator.incident.evidence_records[eid] = orchestrator.tools.evidence_store[eid]
     orchestrator.incident.tool_calls = list(orchestrator.tools.tool_logs)
@@ -194,6 +284,7 @@ def invoke_tool(req: ToolInvocationRequest):
 
     return {
         "tool": req.tool_name,
+        "status": "COMPLETED",
         "result": res,
         "incident": orchestrator.incident.model_dump()
     }
@@ -201,8 +292,16 @@ def invoke_tool(req: ToolInvocationRequest):
 
 @router.post("/remediation/approve")
 def approve_remediation(req: ApprovalRequest):
+    # Enforce role-based authorization for consequential actions
+    normalized_role = req.role.strip().lower().replace(" ", "_")
+    if normalized_role not in AUTHORIZED_APPROVER_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Role '{req.role}' is not authorized to approve consequential remediation actions. Authorized roles: {sorted(list(AUTHORIZED_APPROVER_ROLES))}"
+        )
+
     try:
-        orchestrator.approve_remediation(approver=req.approver, comment=req.comment)
+        orchestrator.approve_remediation(approver=req.approver, comment=req.comment, role=req.role)
         return {
             "success": True,
             "message": "Remediation executed and verified.",

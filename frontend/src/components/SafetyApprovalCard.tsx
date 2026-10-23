@@ -7,7 +7,7 @@ interface SafetyApprovalCardProps {
   policyDecision?: PolicyDecision;
   currentPhase: InvestigationPhase;
   executionStatus: string;
-  onApprove: (approver: string, comment: string) => Promise<void>;
+  onApprove: (approver: string, comment: string, role?: string) => Promise<void>;
   onReject: () => Promise<void>;
 }
 
@@ -20,6 +20,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onReject
 }) => {
   const [approver, setApprover] = useState('');
+  const [role, setRole] = useState('oncall_sre');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!proposal) return null;
@@ -30,7 +31,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
     if (!approver.trim()) return;
     setIsSubmitting(true);
     try {
-      await onApprove(approver.trim(), "Operator authorized rollback and callback replay in simulator");
+      await onApprove(approver.trim(), "Operator authorized rollback and callback replay in simulator", role);
     } finally {
       setIsSubmitting(false);
     }
@@ -87,24 +88,48 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
 
       {isAwaitingApproval ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#cbd5e1' }}>
-            <span>Approver:</span>
-            <input
-              type="text"
-              value={approver}
-              onChange={(e) => setApprover(e.target.value)}
-              placeholder="e.g. lead_sre@company.com (required)"
-              style={{
-                flex: 1,
-                background: '#090d16',
-                border: '1px solid rgba(255, 255, 255, 0.15)',
-                color: '#fff',
-                padding: '4px 8px',
-                borderRadius: '4px',
-                fontSize: '11px',
-                fontFamily: 'var(--font-mono)'
-              }}
-            />
+          <div style={{ display: 'flex', gap: '8px', fontSize: '11px', color: '#cbd5e1' }}>
+            <div style={{ flex: 2, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>Approver:</span>
+              <input
+                type="text"
+                value={approver}
+                onChange={(e) => setApprover(e.target.value)}
+                placeholder="e.g. lead_sre@company.com (required)"
+                style={{
+                  flex: 1,
+                  background: '#090d16',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  color: '#fff',
+                  padding: '4px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)'
+                }}
+              />
+            </div>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <span>Role:</span>
+              <select
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+                style={{
+                  flex: 1,
+                  background: '#090d16',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  color: '#fbbf24',
+                  padding: '4px 6px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  fontFamily: 'var(--font-mono)'
+                }}
+              >
+                <option value="oncall_sre">oncall_sre</option>
+                <option value="lead_sre">lead_sre</option>
+                <option value="incident_commander">incident_commander</option>
+                <option value="staff_sre">staff_sre</option>
+              </select>
+            </div>
           </div>
 
           <div style={{ display: 'flex', gap: '8px' }}>

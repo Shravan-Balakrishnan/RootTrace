@@ -175,6 +175,8 @@ class ApprovalRecord(BaseModel):
     approver: str
     timestamp: str
     comment: Optional[str] = None
+    role: Optional[str] = "oncall_sre"
+    auth_method: Optional[str] = "role_based_session"
 
 
 class RecoveryCheck(BaseModel):

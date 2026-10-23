@@ -290,10 +290,12 @@ class Orchestrator:
                 explanation="Leading candidate lacks sufficient decisive evidence to meet verified threshold."
             )
 
-    def approve_remediation(self, approver: str, comment: Optional[str] = None):
+    def approve_remediation(self, approver: str, comment: Optional[str] = None, role: str = "oncall_sre"):
         """Operator explicitly approves remediation"""
         if not approver or not approver.strip():
             raise ValueError("An explicit approver identity is required.")
+
+        approver_clean = approver.strip()
 
         if not self.incident.remediation_proposal:
             raise ValueError("No remediation proposal exists to approve.")
@@ -311,12 +313,14 @@ class Orchestrator:
             id=f"appr_{uuid.uuid4().hex[:8]}",
             proposal_id=self.incident.remediation_proposal.id,
             approved=True,
-            approver=approver,
+            approver=approver_clean,
+            role=role,
+            auth_method="role_based_session",
             timestamp=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             comment=comment or "Approved rollback and replay in simulated environment."
         )
         self.incident.approval = approval
-        self.incident.decision_trace.append(f"Remediation APPROVED by {approver}: {approval.comment}")
+        self.incident.decision_trace.append(f"Remediation APPROVED by {approver_clean} [{role}]: {approval.comment}")
 
         # Transition to REMEDIATING
         self._transition_to(InvestigationPhase.REMEDIATING, "Executing approved remediation in simulated environment")

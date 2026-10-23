@@ -151,11 +151,11 @@ export const App: React.FC = () => {
     setIncident(data.incident);
   };
 
-  const handleApproveRemediation = async (approver: string, comment: string) => {
+  const handleApproveRemediation = async (approver: string, comment: string, role: string = 'oncall_sre') => {
     const res = await fetch('/api/remediation/approve', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approver, comment })
+      body: JSON.stringify({ approver, comment, role })
     });
     const data = await res.json();
     setIncident(data.incident);

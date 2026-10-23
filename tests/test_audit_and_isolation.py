@@ -53,9 +53,9 @@ def test_api_remediation_approval_workflow(client):
     r_missing = client.post("/api/remediation/approve", json={})
     assert r_missing.status_code == 422
 
-    # Blank approver must fail validation (HTTP 400)
+    # Blank approver must fail validation (HTTP 400 or 422)
     r_blank = client.post("/api/remediation/approve", json={"approver": "   "})
-    assert r_blank.status_code == 400
+    assert r_blank.status_code in [400, 422]
 
     # Explicit approval
     r_approve = client.post("/api/remediation/approve", json={
@@ -146,3 +146,78 @@ def test_invoke_tool_argument_validation(client):
     })
     assert r_valid.status_code == 200
     assert r_valid.json()["result"]["success"] is True
+
+
+def test_invoke_tool_runtime_type_validation(client):
+    # Sending string or list where int is expected (e.g. limit on query_logs) must return 400
+    r_bad_type = client.post("/api/investigate/tool", json={
+        "tool_name": "query_logs",
+        "arguments": {"limit": "not_an_integer"}
+    })
+    assert r_bad_type.status_code == 400
+    assert "Invalid type for argument 'limit'" in r_bad_type.json()["detail"]
+
+    r_bad_type_bool = client.post("/api/investigate/tool", json={
+        "tool_name": "query_logs",
+        "arguments": {"limit": True}
+    })
+    assert r_bad_type_bool.status_code == 400
+
+
+def test_invoke_tool_failed_execution_handling(client):
+    # Limit out of bounds (1..200) triggers failure in tool logic, returning structured FAILED status
+    r = client.post("/api/investigate/tool", json={
+        "tool_name": "query_logs",
+        "arguments": {"limit": 999}
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "FAILED"
+    assert "Limit must be between 1 and 200" in data["error"]
+
+
+def test_invoke_tool_rejects_mutating_and_unknown_methods(client):
+    # Unknown tool
+    r1 = client.post("/api/investigate/tool", json={"tool_name": "completely_unknown_tool", "arguments": {}})
+    assert r1.status_code == 400
+
+    # Internal or mutating method
+    r2 = client.post("/api/investigate/tool", json={"tool_name": "__init__", "arguments": {}})
+    assert r2.status_code == 400
+
+
+def test_approver_whitespace_rejection(client):
+    # Setup incident to awaiting approval
+    client.post("/api/scenarios/select", json={"scenario_id": "callback_race"})
+    client.post("/api/investigate/run")
+
+    # Whitespace-only approver must be rejected
+    r_space = client.post("/api/remediation/approve", json={"approver": "   "})
+    assert r_space.status_code in [400, 422]
+
+    # Too short / invalid chars
+    r_short = client.post("/api/remediation/approve", json={"approver": "a"})
+    assert r_short.status_code in [400, 422]
+
+
+def test_approver_role_authorization_enforcement(client):
+    # Setup incident to awaiting approval
+    client.post("/api/scenarios/select", json={"scenario_id": "callback_race"})
+    client.post("/api/investigate/run")
+
+    # Unauthorized role must be rejected with HTTP 403 Forbidden
+    r_unauth = client.post("/api/remediation/approve", json={
+        "approver": "intern_user",
+        "role": "intern"
+    })
+    assert r_unauth.status_code == 403
+    assert "is not authorized to approve" in r_unauth.json()["detail"]
+
+    # Authorized role succeeds
+    r_auth = client.post("/api/remediation/approve", json={
+        "approver": "lead_sre@company.com",
+        "role": "incident_commander"
+    })
+    assert r_auth.status_code == 200
+    assert r_auth.json()["success"] is True
+    assert r_auth.json()["incident"]["approval"]["role"] == "incident_commander"
