@@ -53,13 +53,19 @@ def test_api_remediation_approval_workflow(client):
     r_missing = client.post("/api/remediation/approve", json={})
     assert r_missing.status_code == 401
 
+    # Create dynamic session for lead SRE
+    sess_res = client.post("/api/auth/session", json={"email": "lead_sre@company.com"})
+    assert sess_res.status_code == 200
+    lead_token = sess_res.json()["session_token"]
+    assert len(lead_token) >= 32  # Cryptographically random token
+
     # Blank approver must fail validation (HTTP 400 or 422)
-    r_blank = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "   "})
+    r_blank = client.post("/api/remediation/approve", json={"auth_token": lead_token, "approver": "   "})
     assert r_blank.status_code in [400, 422]
 
-    # Explicit approval with verified server token
+    # Explicit approval with verified server session
     r_approve = client.post("/api/remediation/approve", json={
-        "auth_token": "sre_token_lead",
+        "auth_token": lead_token,
         "comment": "Rollback to v1.2.3 authorized"
     })
     assert r_approve.status_code == 200
@@ -198,8 +204,12 @@ def test_approver_whitespace_rejection(client):
     r_space = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "   "})
     assert r_space.status_code in [400, 422]
 
+    # Create dynamic session for lead SRE
+    lead_sess = client.post("/api/auth/session", json={"email": "lead_sre@company.com"}).json()
+    lead_token = lead_sess["session_token"]
+
     # Too short / invalid chars
-    r_short = client.post("/api/remediation/approve", json={"auth_token": "sre_token_lead", "approver": "a"})
+    r_short = client.post("/api/remediation/approve", json={"auth_token": lead_token, "approver": "a"})
     assert r_short.status_code in [400, 422]
 
 
@@ -216,24 +226,33 @@ def test_approver_role_authorization_enforcement(client):
     r_fake_token = client.post("/api/remediation/approve", json={"auth_token": "invalid_hacker_token"})
     assert r_fake_token.status_code == 401
 
-    # Unauthorized role via token (guest intern) -> HTTP 403 Forbidden
+    # Dynamic session for unauthorized role (intern) -> HTTP 403 Forbidden
+    intern_sess = client.post("/api/auth/session", json={"email": "intern_observer@company.com"}).json()
+    intern_token = intern_sess["session_token"]
+
     r_unauth = client.post("/api/remediation/approve", json={
-        "auth_token": "guest_token_unauth"
+        "auth_token": intern_token
     })
     assert r_unauth.status_code == 403
     assert "is not authorized to approve" in r_unauth.json()["detail"]
 
-    # Role spoofing prevention: Client claims role="principal_sre" while using an oncall token -> HTTP 403 Forbidden
+    # Role spoofing prevention: Client claims role="principal_sre" while using an oncall session -> HTTP 403 Forbidden
+    oncall_sess = client.post("/api/auth/session", json={"email": "oncall_sre@company.com"}).json()
+    oncall_token = oncall_sess["session_token"]
+
     r_spoof = client.post("/api/remediation/approve", json={
-        "auth_token": "sre_token_oncall",
+        "auth_token": oncall_token,
         "role": "principal_sre"
     })
     assert r_spoof.status_code == 403
     assert "Role mismatch" in r_spoof.json()["detail"]
 
-    # Identity spoofing prevention: Client claims to be lead_sre while using commander token -> HTTP 403 Forbidden
+    # Identity spoofing prevention: Client claims to be lead_sre while using commander session -> HTTP 403 Forbidden
+    cmd_sess = client.post("/api/auth/session", json={"email": "incident_commander@company.com"}).json()
+    cmd_token = cmd_sess["session_token"]
+
     r_id_spoof = client.post("/api/remediation/approve", json={
-        "auth_token": "sre_token_commander",
+        "auth_token": cmd_token,
         "approver": "lead_sre@company.com"
     })
     assert r_id_spoof.status_code == 403
@@ -241,7 +260,7 @@ def test_approver_role_authorization_enforcement(client):
 
     # Server-verified token authorization succeeds
     r_auth = client.post("/api/remediation/approve", json={
-        "auth_token": "sre_token_commander"
+        "auth_token": cmd_token
     })
     assert r_auth.status_code == 200
     data = r_auth.json()
@@ -252,12 +271,25 @@ def test_approver_role_authorization_enforcement(client):
     assert data["incident"]["approval"]["approver"] == "incident_commander@company.com"
 
 
-def test_list_authenticated_principals_endpoint(client):
-    r = client.get("/api/auth/principals")
-    assert r.status_code == 200
-    principals = r.json()
-    assert len(principals) >= 4
-    tokens = [p["token"] for p in principals]
-    assert "sre_token_lead" in tokens
-    assert "sre_token_commander" in tokens
-    assert "guest_token_unauth" in tokens
+def test_auth_session_creation_and_profile(client):
+    # 1. Unknown user fails to create session
+    r_bad_user = client.post("/api/auth/session", json={"email": "unknown_hacker@domain.com"})
+    assert r_bad_user.status_code == 401
+
+    # 2. Known user obtains random, ephemeral session token
+    r_sess = client.post("/api/auth/session", json={"email": "staff_sre@company.com"})
+    assert r_sess.status_code == 200
+    data = r_sess.json()
+    assert "session_token" in data
+    assert len(data["session_token"]) >= 32
+    assert data["role"] == "staff_sre"
+
+    # 3. GET /api/auth/me returns caller profile without leaking tokens
+    token = data["session_token"]
+    r_me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert r_me.status_code == 200
+    me = r_me.json()
+    assert me["email"] == "staff_sre@company.com"
+    assert me["role"] == "staff_sre"
+    assert "token" not in me
+    assert "session_token" not in me

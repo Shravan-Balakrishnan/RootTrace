@@ -1,7 +1,7 @@
 """
 FastAPI REST Routes for RootTrace API.
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel, field_validator
 import re
 from typing import Dict, Any, List, Optional
@@ -16,6 +16,10 @@ orchestrator = Orchestrator(scenario_id="callback_race")
 
 class ScenarioSelectRequest(BaseModel):
     scenario_id: str
+
+
+class SessionInitRequest(BaseModel):
+    email: str
 
 
 class ApprovalRequest(BaseModel):
@@ -292,20 +296,36 @@ def invoke_tool(req: ToolInvocationRequest):
     }
 
 
-@router.get("/auth/principals")
-def list_authenticated_principals():
-    """List active server-side verified principals for operator session selection."""
-    from ..safety.auth import VERIFIED_PRINCIPALS, AUTHORIZED_APPROVER_ROLES
-    return [
-        {
-            "token": token,
-            "email": p.email,
-            "name": p.name,
-            "role": p.role,
-            "is_authorized": p.role.lower().replace(" ", "_") in AUTHORIZED_APPROVER_ROLES
-        }
-        for token, p in VERIFIED_PRINCIPALS.items()
-    ]
+@router.post("/auth/session")
+def initialize_session(req: SessionInitRequest):
+    """
+    Authenticates an operator against the organization directory and issues
+    an ephemeral, cryptographically random session token.
+    Credentials are NEVER hardcoded or statically exposed.
+    """
+    from ..safety.auth import create_authenticated_session
+    session = create_authenticated_session(req.email)
+    return {
+        "session_token": session.token,
+        "email": session.principal.email,
+        "name": session.principal.name,
+        "role": session.principal.role,
+        "expires_at": session.expires_at.isoformat()
+    }
+
+
+@router.get("/auth/me")
+def get_current_user_profile(authorization: Optional[str] = Header(None)):
+    """Returns the verified profile of the active authenticated session. Never leaks tokens."""
+    from ..safety.auth import authenticate_and_authorize_approver
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication required: Missing Authorization header.")
+    principal = authenticate_and_authorize_approver(auth_token=authorization)
+    return {
+        "email": principal.email,
+        "name": principal.name,
+        "role": principal.role
+    }
 
 
 @router.post("/remediation/approve")

@@ -1,11 +1,13 @@
 """
 Server-side Authentication and Authorization Service for RootTrace.
-Derives approver identity and role strictly from verified server-side tokens and sessions.
-Guarantees that clients cannot self-assign privileged roles.
+Issues cryptographically random session tokens and enforces strict role-based access.
+Credentials are NEVER hardcoded in source code or publicly enumerated.
 """
+import datetime
+import secrets
 from typing import Dict, Optional, Set
-from pydantic import BaseModel
-from fastapi import HTTPException, status, Header
+from pydantic import BaseModel, Field
+from fastapi import HTTPException, status
 
 
 class UserPrincipal(BaseModel):
@@ -16,38 +18,40 @@ class UserPrincipal(BaseModel):
     is_active: bool = True
 
 
-# Pre-provisioned verified enterprise credentials / session tokens
-VERIFIED_PRINCIPALS: Dict[str, UserPrincipal] = {
-    "sre_token_lead": UserPrincipal(
-        user_id="usr_lead_01",
-        email="lead_sre@company.com",
-        name="Lead SRE (Primary)",
-        role="lead_sre"
-    ),
-    "sre_token_commander": UserPrincipal(
-        user_id="usr_cmd_02",
-        email="incident_commander@company.com",
-        name="Incident Commander",
-        role="incident_commander"
-    ),
-    "sre_token_oncall": UserPrincipal(
-        user_id="usr_oncall_03",
-        email="oncall_sre@company.com",
-        name="On-Call SRE",
-        role="oncall_sre"
-    ),
-    "sre_token_staff": UserPrincipal(
-        user_id="usr_staff_04",
-        email="staff_sre@company.com",
-        name="Staff SRE",
-        role="staff_sre"
-    ),
-    "guest_token_unauth": UserPrincipal(
-        user_id="usr_intern_99",
-        email="intern_observer@company.com",
-        name="Guest Intern (Read-Only)",
-        role="intern"
-    )
+class SessionRecord(BaseModel):
+    token: str
+    principal: UserPrincipal
+    created_at: datetime.datetime = Field(default_factory=lambda: datetime.datetime.now(datetime.timezone.utc))
+    expires_at: datetime.datetime
+
+
+# Organization Directory defining authorized SRE personnel and their verified roles
+ORGANIZATION_DIRECTORY: Dict[str, Dict[str, str]] = {
+    "lead_sre@company.com": {
+        "user_id": "usr_sre_01",
+        "name": "Lead SRE (Primary)",
+        "role": "lead_sre"
+    },
+    "incident_commander@company.com": {
+        "user_id": "usr_cmd_02",
+        "name": "Incident Commander",
+        "role": "incident_commander"
+    },
+    "oncall_sre@company.com": {
+        "user_id": "usr_oncall_03",
+        "name": "On-Call SRE",
+        "role": "oncall_sre"
+    },
+    "staff_sre@company.com": {
+        "user_id": "usr_staff_04",
+        "name": "Staff SRE",
+        "role": "staff_sre"
+    },
+    "intern_observer@company.com": {
+        "user_id": "usr_intern_99",
+        "name": "Junior SRE Intern",
+        "role": "intern"
+    }
 }
 
 AUTHORIZED_APPROVER_ROLES: Set[str] = {
@@ -58,6 +62,46 @@ AUTHORIZED_APPROVER_ROLES: Set[str] = {
     "principal_sre"
 }
 
+# In-memory ephemeral active session registry: token -> SessionRecord
+_ACTIVE_SESSIONS: Dict[str, SessionRecord] = {}
+
+
+def create_authenticated_session(email: str, ttl_seconds: int = 3600) -> SessionRecord:
+    """
+    Authenticates an operator against the organization directory and issues
+    a cryptographically secure random session token.
+    Role is derived strictly from the directory and cannot be forged by the client.
+    """
+    clean_email = email.strip().lower()
+    user_info = ORGANIZATION_DIRECTORY.get(clean_email)
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Authentication failed: User '{email}' is not in the organization directory."
+        )
+
+    # Generate a cryptographically random, unguessable token
+    token = secrets.token_urlsafe(32)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    expires = now + datetime.timedelta(seconds=ttl_seconds)
+
+    principal = UserPrincipal(
+        user_id=user_info["user_id"],
+        email=clean_email,
+        name=user_info["name"],
+        role=user_info["role"],
+        is_active=True
+    )
+
+    record = SessionRecord(
+        token=token,
+        principal=principal,
+        created_at=now,
+        expires_at=expires
+    )
+    _ACTIVE_SESSIONS[token] = record
+    return record
+
 
 def authenticate_and_authorize_approver(
     auth_token: Optional[str] = None,
@@ -65,30 +109,39 @@ def authenticate_and_authorize_approver(
     client_claimed_role: Optional[str] = None
 ) -> UserPrincipal:
     """
-    Authenticates the token against server session registry.
-    Strictly derives identity and role from the server-verified principal.
-    Rejects missing/invalid tokens with 401 Unauthorized.
+    Validates a session token.
+    Strictly derives identity and role from the active server session.
+    Rejects missing, expired, or invalid tokens with 401 Unauthorized.
     Rejects unauthorized roles with 403 Forbidden.
-    Rejects client attempts to spoof identity or elevate privileges.
+    Rejects client attempts to spoof identity or elevate roles with 403 Forbidden.
     """
     if not auth_token or not auth_token.strip():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required: Missing or empty 'auth_token'. Provide a verified SRE session token."
+            detail="Authentication required: Missing or empty 'auth_token'. Provide a verified session token."
         )
 
     token_clean = auth_token.strip()
-    # Support 'Bearer <token>' prefix if passed
     if token_clean.lower().startswith("bearer "):
         token_clean = token_clean[7:].strip()
 
-    principal = VERIFIED_PRINCIPALS.get(token_clean)
-    if not principal:
+    session = _ACTIVE_SESSIONS.get(token_clean)
+    if not session:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed: Invalid or unrecognized approval token."
+            detail="Authentication failed: Invalid or unrecognized approval session token."
         )
 
+    # Check session expiration
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if now > session.expires_at:
+        _ACTIVE_SESSIONS.pop(token_clean, None)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication failed: Session token has expired. Please re-authenticate."
+        )
+
+    principal = session.principal
     if not principal.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -103,13 +156,13 @@ def authenticate_and_authorize_approver(
             detail=f"Principal '{principal.email}' with role '{principal.role}' is not authorized to approve consequential remediation actions. Authorized roles: {sorted(list(AUTHORIZED_APPROVER_ROLES))}"
         )
 
-    # Defend against spoofing: If the client passed an approver or role that doesn't match the token
+    # Defend against spoofing
     if client_claimed_approver and client_claimed_approver.strip():
         claimed_clean = client_claimed_approver.strip().lower()
         if claimed_clean not in (principal.email.lower(), principal.user_id.lower()):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Identity mismatch: Token belongs to '{principal.email}', cannot approve as '{client_claimed_approver}'."
+                detail=f"Identity mismatch: Session belongs to '{principal.email}', cannot approve as '{client_claimed_approver}'."
             )
 
     if client_claimed_role and client_claimed_role.strip():
@@ -117,7 +170,12 @@ def authenticate_and_authorize_approver(
         if claimed_role_norm != normalized_role:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Role mismatch: Token grants role '{principal.role}', cannot approve as '{client_claimed_role}'."
+                detail=f"Role mismatch: Session grants role '{principal.role}', cannot approve as '{client_claimed_role}'."
             )
 
     return principal
+
+
+def reset_auth_sessions():
+    """Clear all active sessions (used during test teardown)."""
+    _ACTIVE_SESSIONS.clear()

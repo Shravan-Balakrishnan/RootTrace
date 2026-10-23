@@ -19,7 +19,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
   onApprove,
   onReject
 }) => {
-  const [authToken, setAuthToken] = useState('sre_token_lead');
+  const [selectedEmail, setSelectedEmail] = useState('lead_sre@company.com');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -31,7 +31,18 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
     setIsSubmitting(true);
     setErrorMessage(null);
     try {
-      await onApprove(authToken, "Operator authorized rollback and callback replay in simulator");
+      // Authenticate dynamically against server directory to issue an ephemeral, random session token
+      const sessionRes = await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: selectedEmail })
+      });
+      if (!sessionRes.ok) {
+        const errData = await sessionRes.json();
+        throw new Error(errData.detail || 'Authentication failed.');
+      }
+      const sessionData = await sessionRes.json();
+      await onApprove(sessionData.session_token, "Operator authorized rollback and callback replay in simulator");
     } catch (err: any) {
       setErrorMessage(err?.message || "Approval authorization failed.");
     } finally {
@@ -92,18 +103,18 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '4px' }}>
           <div style={{ display: 'flex', gap: '8px', fontSize: '11px', color: '#cbd5e1' }}>
             <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span style={{ fontWeight: 600 }}>Active Verified Session:</span>
+              <span style={{ fontWeight: 600 }}>Authenticated Operator:</span>
               <select
-                value={authToken}
+                value={selectedEmail}
                 onChange={(e) => {
-                  setAuthToken(e.target.value);
+                  setSelectedEmail(e.target.value);
                   setErrorMessage(null);
                 }}
                 style={{
                   flex: 1,
                   background: '#090d16',
                   border: '1px solid rgba(255, 255, 255, 0.2)',
-                  color: authToken === 'guest_token_unauth' ? '#f87171' : '#34d399',
+                  color: selectedEmail === 'intern_observer@company.com' ? '#f87171' : '#34d399',
                   padding: '6px 8px',
                   borderRadius: '4px',
                   fontSize: '11px',
@@ -111,10 +122,10 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
                   fontFamily: 'var(--font-mono)'
                 }}
               >
-                <option value="sre_token_lead">lead_sre@company.com [Role: lead_sre — Authorized]</option>
-                <option value="sre_token_commander">incident_commander@company.com [Role: incident_commander — Authorized]</option>
-                <option value="sre_token_oncall">oncall_sre@company.com [Role: oncall_sre — Authorized]</option>
-                <option value="guest_token_unauth">intern_observer@company.com [Role: intern — 403 Forbidden]</option>
+                <option value="lead_sre@company.com">lead_sre@company.com [Verified Role: lead_sre — Authorized]</option>
+                <option value="incident_commander@company.com">incident_commander@company.com [Verified Role: incident_commander — Authorized]</option>
+                <option value="oncall_sre@company.com">oncall_sre@company.com [Verified Role: oncall_sre — Authorized]</option>
+                <option value="intern_observer@company.com">intern_observer@company.com [Verified Role: intern — 403 Forbidden]</option>
               </select>
             </div>
           </div>
@@ -142,7 +153,7 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
               disabled={isSubmitting}
               style={{
                 flex: 1,
-                background: isSubmitting ? '#334155' : (authToken === 'guest_token_unauth' ? '#7f1d1d' : 'linear-gradient(135deg, #10b981, #059669)'),
+                background: isSubmitting ? '#334155' : (selectedEmail === 'intern_observer@company.com' ? '#7f1d1d' : 'linear-gradient(135deg, #10b981, #059669)'),
                 color: isSubmitting ? '#94a3b8' : '#fff',
                 border: 'none',
                 padding: '8px 14px',
@@ -154,11 +165,11 @@ export const SafetyApprovalCard: React.FC<SafetyApprovalCardProps> = ({
                 alignItems: 'center',
                 justifyContent: 'center',
                 gap: '6px',
-                boxShadow: isSubmitting ? 'none' : (authToken === 'guest_token_unauth' ? '0 0 10px rgba(239, 68, 68, 0.3)' : '0 0 12px rgba(16, 185, 129, 0.3)')
+                boxShadow: isSubmitting ? 'none' : (selectedEmail === 'intern_observer@company.com' ? '0 0 10px rgba(239, 68, 68, 0.3)' : '0 0 12px rgba(16, 185, 129, 0.3)')
               }}
             >
               <CheckCircle2 size={14} />
-              {isSubmitting ? 'Verifying Credentials...' : (authToken === 'guest_token_unauth' ? 'Test Unauthorized Approval (Expect 403 Block)' : 'Authorize & Execute Verified Remediation')}
+              {isSubmitting ? 'Authenticating Session & Executing...' : (selectedEmail === 'intern_observer@company.com' ? 'Test Unauthorized Operator (Expect 403 Block)' : 'Authorize & Execute Verified Remediation')}
             </button>
 
             <button
