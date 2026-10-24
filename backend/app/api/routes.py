@@ -381,6 +381,7 @@ def resume_autonomy():
 @router.get("/system/status")
 def system_status():
     from ..config import load_dotenv
+    from ..llm.provider import LLMProvider
     load_dotenv()
     if not orchestrator.llm.config.api_key_configured or orchestrator.llm.config.provider == "deterministic":
         orchestrator.llm = LLMProvider()

@@ -138,7 +138,11 @@ class Orchestrator:
         tool_fn = getattr(self.tools, tool_name, None)
         res = None
         if tool_fn:
-            res = tool_fn(**tool_args)
+            import inspect
+            sig = inspect.signature(tool_fn)
+            has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            bound_args = tool_args if has_varkw else {k: v for k, v in tool_args.items() if k in sig.parameters}
+            res = tool_fn(**bound_args)
             for eid in res.get("evidence_ids", []):
                 self.incident.evidence_records[eid] = self.tools.evidence_store[eid]
 
