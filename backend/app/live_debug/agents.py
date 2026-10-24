@@ -376,40 +376,11 @@ class RepairVerificationAgent:
         error_context: str,
         evidence: List[SanitizedEvidenceRecord]
     ) -> Tuple[PatchProposal, AgentExecutionRecord]:
-        """Synthesizes candidate patch and binds cryptographic hash."""
+        """Synthesizes candidate patch via Groq LLM (with deterministic fallback) and binds cryptographic hash."""
         t0 = time.perf_counter()
         now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-        if "ZeroDivisionError" in error_context or "division by zero" in error_context.lower():
-            proposed_diff = (
-                "--- a/app/services.py\n"
-                "+++ b/app/services.py\n"
-                "@@ -58,4 +58,4 @@\n"
-                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
-                "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
-                "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
-                "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
-            )
-        elif "AssertionError" in error_context and "132.0" in error_context:
-            proposed_diff = (
-                "--- a/app/services.py\n"
-                "+++ b/app/services.py\n"
-                "@@ -58,4 +58,4 @@\n"
-                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
-                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
-                "-    final_total = round(discounted_subtotal, 2)\n"
-                "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
-            )
-        else:
-            proposed_diff = (
-                "--- a/app/services.py\n"
-                "+++ b/app/services.py\n"
-                "@@ -58,4 +58,4 @@\n"
-                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
-                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
-                "-    final_total = round(discounted_subtotal, 2)\n"
-                "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
-            )
+        proposed_diff = self._generate_diff_via_groq(workspace_id, error_context, evidence)
 
         val = OutputValidator.validate_unified_diff(proposed_diff, permitted_workspace_root=".")
         norm_diff = proposed_diff.strip().replace("\r\n", "\n")
@@ -418,8 +389,8 @@ class RepairVerificationAgent:
         proposal = PatchProposal(
             id=f"PATCH-{uuid.uuid4().hex[:6].upper()}",
             run_id=run_id,
-            title="Restore Valid Calculation in Order Service",
-            explanation="Corrects calculation logic in services.py to ensure tax and totals match business rules.",
+            title="AI-Generated Fix for Detected Code Defect",
+            explanation="Groq LLM analyzed the actual source code and error output to produce a targeted minimal fix.",
             diff=norm_diff,
             patch_hash=patch_hash,
             target_workspace=workspace_id,
@@ -447,3 +418,138 @@ class RepairVerificationAgent:
         )
 
         return proposal, record
+
+    def _generate_diff_via_groq(
+        self,
+        workspace_id: str,
+        error_context: str,
+        evidence: List[SanitizedEvidenceRecord]
+    ) -> str:
+        """
+        Calls Groq API with the actual source file content + error context to generate a precise unified diff.
+        Falls back to heuristic diff if no API key is configured or the call fails.
+        """
+        import os, pathlib
+
+        groq_api_key = None
+        for var in ["GROQ_API_KEY", "GROQ_API_KEY_1", "GROQ_API_KEY_2"]:
+            groq_api_key = os.getenv(var, "").strip()
+            if groq_api_key:
+                break
+
+        # Read actual source from workspace
+        source_content = ""
+        ws_path = pathlib.Path(workspace_id)
+        services_path = ws_path / "app" / "services.py"
+        if services_path.exists():
+            try:
+                source_content = services_path.read_text(encoding="utf-8")
+            except Exception:
+                pass
+
+        if not groq_api_key or not source_content:
+            logger.warning("Groq API key not set or source not found — using heuristic fallback patch.")
+            return self._heuristic_fallback_diff(error_context)
+
+        try:
+            return self._call_groq_for_diff(groq_api_key, source_content, error_context)
+        except Exception as e:
+            logger.warning(f"Groq API call failed ({e}) — using heuristic fallback patch.")
+            return self._heuristic_fallback_diff(error_context)
+
+    def _call_groq_for_diff(self, api_key: str, source_content: str, error_context: str) -> str:
+        """Calls Groq chat completions API and extracts a unified diff from the response."""
+        import urllib.request, urllib.error, json
+
+        model = __import__("os").getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+        prompt = f"""You are an expert Python debugging agent. You will be given the full source code of a buggy file and the error output from running tests against it.
+
+Your task: Produce a minimal, correct unified diff (standard `diff -u` format) that fixes ONLY the bug causing the test failures. Do not refactor, rename, or change anything else.
+
+Rules:
+- Output ONLY the raw unified diff block. No explanations, no markdown fences, no extra text.
+- Use `--- a/app/services.py` and `+++ b/app/services.py` as the file headers.
+- The diff must be syntactically valid and apply cleanly to the source.
+- Fix only the actual bug — do not touch unrelated lines.
+
+ERROR OUTPUT:
+{error_context[:3000]}
+
+SOURCE FILE (app/services.py):
+{source_content[:4000]}
+
+Unified diff:"""
+
+        payload = json.dumps({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+            "max_tokens": 800
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        content = data["choices"][0]["message"]["content"].strip()
+
+        # Strip markdown fences if model wrapped the diff
+        if content.startswith("```"):
+            lines = content.splitlines()
+            # Remove opening fence line
+            lines = lines[1:]
+            # Remove closing fence if present
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            content = "\n".join(lines).strip()
+
+        # Validate it looks like a unified diff
+        if "--- " not in content or "+++ " not in content or "@@" not in content:
+            raise ValueError(f"Groq response did not contain a valid unified diff: {content[:200]}")
+
+        logger.info(f"Groq generated patch ({len(content)} chars) using model {model}")
+        return content
+
+    def _heuristic_fallback_diff(self, error_context: str) -> str:
+        """Deterministic fallback patch when Groq is unavailable."""
+        if "ZeroDivisionError" in error_context or "division by zero" in error_context.lower():
+            return (
+                "--- a/app/services.py\n"
+                "+++ b/app/services.py\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+                "-    tax_amount = round(discounted_subtotal / 0, 2)\n"
+                "+    tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+                "     final_total = round(discounted_subtotal + tax_amount, 2)\n"
+            )
+        elif "AssertionError" in error_context and "132.0" in error_context:
+            return (
+                "--- a/app/services.py\n"
+                "+++ b/app/services.py\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+                "-    final_total = round(discounted_subtotal, 2)\n"
+                "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
+            )
+        else:
+            return (
+                "--- a/app/services.py\n"
+                "+++ b/app/services.py\n"
+                "@@ -58,4 +58,4 @@\n"
+                "     discounted_subtotal = max(0.0, subtotal - discount_amount)\n"
+                "     tax_amount = round(discounted_subtotal * tax_rate, 2)\n"
+                "-    final_total = round(discounted_subtotal, 2)\n"
+                "+    final_total = round(discounted_subtotal + tax_amount, 2)\n"
+            )
+

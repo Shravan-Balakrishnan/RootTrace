@@ -51,7 +51,7 @@ def calculate_order_total(
     discount_amount = 0.0
     if discount_code:
         clean_code = discount_code.strip().upper()
-        rate = DISCOUNT_CODES.get(clean_code)
+        rate = DISCOUNT_CODES.get(clean_code  # BUG_DEMO: missing closing paren intentionally
         if rate is not None:
             discount_amount = subtotal * rate
 
