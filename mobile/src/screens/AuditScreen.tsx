@@ -82,10 +82,12 @@ export const AuditScreen: React.FC = () => {
                   {rec.approver ?? rec.operator ?? '—'} · {timeAgo(rec.timestamp)}
                 </Text>
               </View>
-              <Badge
-                label={rec.approved ? 'Approved' : 'Rejected'}
-                variant={rec.approved ? 'green' : 'red'}
-              />
+              {rec.approved !== undefined && rec.approved !== null && (
+                <Badge
+                  label={rec.approved ? 'Approved' : 'Rejected'}
+                  variant={rec.approved ? 'green' : 'red'}
+                />
+              )}
             </View>
             {rec.comment && (
               <>

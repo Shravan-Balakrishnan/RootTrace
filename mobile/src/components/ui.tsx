@@ -21,10 +21,13 @@ const badgeColors: Record<BadgeVariant, { bg: string; border: string; text: stri
   gray:  { bg: '#F9FAFB',         border: '#E5E7EB',          text: '#6B7280'    },
 };
 
-export const Badge: React.FC<{ label: string; variant?: BadgeVariant; size?: 'sm' | 'md' }> = ({
+export const Badge: React.FC<{ label?: string | null; variant?: BadgeVariant; size?: 'sm' | 'md' }> = ({
   label, variant = 'gray', size = 'sm',
 }) => {
-  const c = badgeColors[variant];
+  const safeVariant: BadgeVariant = (variant && badgeColors[variant]) ? variant : 'gray';
+  const c = badgeColors[safeVariant];
+  const safeLabel = (label ?? '').toUpperCase();
+  if (!safeLabel) return null;
   return (
     <View style={[
       styles.badge,
@@ -32,7 +35,7 @@ export const Badge: React.FC<{ label: string; variant?: BadgeVariant; size?: 'sm
       size === 'md' && { paddingHorizontal: 10, paddingVertical: 4, borderRadius: Radius.md },
     ]}>
       <Text style={[styles.badgeText, { color: c.text }, size === 'md' && { fontSize: 12 }]}>
-        {label.toUpperCase()}
+        {safeLabel}
       </Text>
     </View>
   );
