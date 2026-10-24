@@ -441,11 +441,14 @@ class RepairVerificationAgent:
         source_content = ""
         ws_path = pathlib.Path(workspace_id)
         services_path = ws_path / "app" / "services.py"
+        if not services_path.exists():
+            repo_root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
+            services_path = repo_root / "live-lab" / "app" / "services.py"
         if services_path.exists():
             try:
                 source_content = services_path.read_text(encoding="utf-8")
-            except Exception:
-                pass
+            except Exception as read_err:
+                logger.warning(f"Failed to read source from {services_path}: {read_err}")
 
         if not groq_api_key or not source_content:
             logger.warning("Groq API key not set or source not found — using heuristic fallback patch.")
@@ -454,14 +457,14 @@ class RepairVerificationAgent:
         try:
             return self._call_groq_for_diff(groq_api_key, source_content, error_context)
         except Exception as e:
-            logger.warning(f"Groq API call failed ({e}) — using heuristic fallback patch.")
+            logger.error(f"Groq API call failed ({e}) — using heuristic fallback patch.", exc_info=True)
             return self._heuristic_fallback_diff(error_context)
 
     def _call_groq_for_diff(self, api_key: str, source_content: str, error_context: str) -> str:
         """Calls Groq chat completions API and extracts a unified diff from the response."""
         import urllib.request, urllib.error, json
 
-        model = __import__("os").getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+        model = __import__("os").getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
         prompt = f"""You are an expert Python debugging agent. You will be given the full source code of a buggy file and the error output from running tests against it.
 
@@ -493,7 +496,8 @@ Unified diff:"""
             data=payload,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
             },
             method="POST"
         )
@@ -503,20 +507,55 @@ Unified diff:"""
 
         content = data["choices"][0]["message"]["content"].strip()
 
-        # Strip markdown fences if model wrapped the diff
-        if content.startswith("```"):
-            lines = content.splitlines()
-            # Remove opening fence line
-            lines = lines[1:]
-            # Remove closing fence if present
-            if lines and lines[-1].strip().startswith("```"):
-                lines = lines[:-1]
-            content = "\n".join(lines).strip()
+        # Robust extraction: handle markdown fences or preamble text
+        if "```" in content:
+            parts = content.split("```")
+            for part in parts:
+                if "--- " in part and "+++" in part:
+                    lines = part.strip().splitlines()
+                    if lines and lines[0].lower().strip() in ("diff", "patch"):
+                        lines = lines[1:]
+                    content = "\n".join(lines).strip()
+                    break
+        elif "--- " in content and "+++" in content:
+            idx = content.find("--- ")
+            content = content[idx:].strip()
 
         # Validate it looks like a unified diff
         if "--- " not in content or "+++ " not in content or "@@" not in content:
             raise ValueError(f"Groq response did not contain a valid unified diff: {content[:200]}")
 
+        # Normalize hunks: strip trailing markers like '*** End of File ***' and ensure valid @@ -start,len +start,len @@
+        diff_lines = [l for l in content.splitlines() if not l.strip().startswith("***")]
+        source_lines = source_content.splitlines()
+        normalized_out = []
+        i = 0
+        while i < len(diff_lines):
+            line = diff_lines[i]
+            if line.strip() in ("@@", "@@ @@") or (line.startswith("@@") and not __import__("re").search(r"^@@ -\d+", line)):
+                del_count = 0
+                add_count = 0
+                first_match_idx = None
+                j = i + 1
+                while j < len(diff_lines) and not diff_lines[j].startswith("@@"):
+                    if diff_lines[j].startswith("-") and first_match_idx is None:
+                        target_sub = diff_lines[j][1:].strip()
+                        for s_idx, s_line in enumerate(source_lines):
+                            if target_sub in s_line:
+                                first_match_idx = s_idx + 1
+                                break
+                    if diff_lines[j].startswith("-"):
+                        del_count += 1
+                    elif diff_lines[j].startswith("+"):
+                        add_count += 1
+                    j += 1
+                start_line = first_match_idx or 1
+                normalized_out.append(f"@@ -{start_line},{max(1, del_count)} +{start_line},{max(1, add_count)} @@")
+            else:
+                normalized_out.append(line)
+            i += 1
+
+        content = "\n".join(normalized_out).strip()
         logger.info(f"Groq generated patch ({len(content)} chars) using model {model}")
         return content
 

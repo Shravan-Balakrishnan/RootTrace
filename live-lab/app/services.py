@@ -51,10 +51,9 @@ def calculate_order_total(
     discount_amount = 0.0
     if discount_code:
         clean_code = discount_code.strip().upper()
-        rate = DISCOUNT_CODES.get(clean_code  # BUG_DEMO: missing closing paren intentionally
+        rate = DISCOUNT_CODES.get(clean_code)
         if rate is not None:
             discount_amount = subtotal * rate
-
     discounted_subtotal = max(0.0, subtotal - discount_amount)
     tax_amount = round(discounted_subtotal * tax_rate, 2)
     final_total = round(discounted_subtotal + tax_amount, 2)

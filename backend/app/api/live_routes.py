@@ -24,7 +24,7 @@ from ..live_debug import (
     LiveRunStateStore,
     EvidenceLogIntelligenceAgent
 )
-from ..safety.auth import authenticate_and_authorize_approver, create_authenticated_session
+from ..safety.auth import authenticate_and_authorize_approver, create_authenticated_session, AUTHORIZED_APPROVER_ROLES
 
 router = APIRouter(prefix="/api/live")
 

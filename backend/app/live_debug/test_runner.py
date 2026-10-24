@@ -79,11 +79,18 @@ class LiveDebugTestRunner:
                     passed += 1
                 elif " FAILED" in line:
                     failed += 1
-                elif "E   " in line or "AssertionError" in line or "ZeroDivisionError" in line or "TypeError" in line:
+                elif any(kw in line for kw in (
+                    "E   ", "AssertionError", "ZeroDivisionError", "TypeError",
+                    "SyntaxError", "IndentationError", "NameError", "ImportError",
+                    "AttributeError", "ValueError", "ERROR collecting", "Error:", "FAILED"
+                )):
                     error_lines.append(line.strip())
 
             total = passed + failed
             all_passed = (res.returncode == 0) and (failed == 0)
+            if not all_passed and failed == 0:
+                failed = 1
+                total = max(total, 1)
 
             return TestExecutionResult(
                 all_passed=all_passed,

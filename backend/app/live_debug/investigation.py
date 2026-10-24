@@ -145,10 +145,21 @@ class LiveInvestigationEngine:
         # 4. Agent 4: Repair & Verification (Patch Synthesis & Proposal)
         error_msgs = []
         for ev in collected.evidence_records:
-            if ev.source_tool == "regression_test_runner" and ev.data.get("error_summary"):
-                error_msgs.extend(ev.data["error_summary"])
-            elif ev.source_tool == "process_logs" and ev.data.get("traceback"):
-                error_msgs.extend(ev.data["traceback"])
+            if ev.source_tool == "regression_test_runner":
+                if ev.data.get("error_summary"):
+                    error_msgs.extend(ev.data["error_summary"])
+                raw_out = ev.data.get("raw_output")
+                if raw_out:
+                    error_msgs.append("\n--- Pytest Test Runner Output ---")
+                    error_msgs.append(raw_out[-2500:])
+            elif ev.source_tool == "process_logs":
+                if ev.data.get("traceback"):
+                    error_msgs.extend(ev.data["traceback"])
+                elif ev.data.get("lines"):
+                    error_msgs.append("\n--- Recent Process Logs ---")
+                    error_msgs.append("\n".join(ev.data["lines"][-15:]))
+            elif ev.source_tool == "health_probe" and not ev.data.get("is_healthy", True):
+                error_msgs.append(f"Health Probe Failed: {ev.summary}")
         error_context = "\n".join(error_msgs) if error_msgs else collected.summary
 
         patch_proposal, a4_record = self.repair_agent.propose_patch(
