@@ -22,7 +22,7 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.safe}>
-      <StatusBar barStyle="dark-content" backgroundColor={Colors.white} />
+      <StatusBar barStyle="dark-content" />
 
       {/* Top Header */}
       <View style={styles.header}>

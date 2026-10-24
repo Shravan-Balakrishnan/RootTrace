@@ -9,30 +9,42 @@
  * Never hardcode localhost here.
  */
 
-const API_BASE: string =
-  (process.env.EXPO_PUBLIC_API_BASE_URL ?? '').replace(/\/$/, '');
+let customApiBase: string | null = null;
 
-if (!API_BASE && __DEV__) {
-  console.warn(
-    '[RootTrace] EXPO_PUBLIC_API_BASE_URL is not set. ' +
-    'Create a .env.local file with EXPO_PUBLIC_API_BASE_URL=http://<your-host>:8000',
-  );
+export function getApiBase(): string {
+  if (customApiBase !== null && customApiBase.trim().length > 0) {
+    return customApiBase.trim().replace(/\/$/, '');
+  }
+  const envUrl = process.env.EXPO_PUBLIC_API_BASE_URL;
+  if (envUrl && envUrl.trim().length > 0) {
+    return envUrl.trim().replace(/\/$/, '');
+  }
+  return 'http://192.168.2.19:8000';
+}
+
+export function setApiBase(url: string) {
+  customApiBase = url.trim().replace(/\/$/, '');
 }
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${API_BASE}${path}`;
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers ?? {}),
-    },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+  const base = getApiBase();
+  const url = `${base}${path}`;
+  try {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    }
+    return res.json() as Promise<T>;
+  } catch (err: any) {
+    throw new Error(`${err.message ?? 'Network error'} (Target: ${url})`);
   }
-  return res.json() as Promise<T>;
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

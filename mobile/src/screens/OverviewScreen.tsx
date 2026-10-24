@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View, Text, ScrollView, RefreshControl,
-  StyleSheet, TouchableOpacity, Animated,
+  StyleSheet, TouchableOpacity, Animated, TextInput, Platform,
 } from 'react-native';
-import { api, LiveStatus } from '../api';
+import { api, LiveStatus, getApiBase, setApiBase } from '../api';
 import {
   StatusDot, Badge, Card, MetricCard, SectionHeader,
   PrimaryButton, EmptyState, ErrorBanner, Divider,
@@ -33,6 +33,9 @@ export const OverviewScreen: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [processLoading, setProcessLoading] = useState(false);
+  const [currentUrl, setCurrentUrl] = useState(getApiBase());
+  const [inputUrl, setInputUrl] = useState(getApiBase());
+  const [showConfig, setShowConfig] = useState(false);
   const pingAnim = useRef(new Animated.Value(1)).current;
 
   const fetchStatus = useCallback(async () => {
@@ -86,7 +89,61 @@ export const OverviewScreen: React.FC = () => {
       contentContainerStyle={styles.content}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
     >
-      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
+      {/* Backend Endpoint Control Bar */}
+      <View style={styles.serverBar}>
+        <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center' }}>
+          <Text style={styles.serverBarLabel}>API Host:</Text>
+          <Text style={styles.serverBarUrl} numberOfLines={1}>{currentUrl}</Text>
+        </View>
+        <TouchableOpacity
+          onPress={() => {
+            setInputUrl(currentUrl);
+            setShowConfig(!showConfig);
+          }}
+          style={styles.serverBarBtnWrap}
+        >
+          <Text style={styles.serverBarBtnText}>{showConfig ? 'Close' : 'Change'}</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Endpoint Configuration Drawer */}
+      {showConfig && (
+        <View style={styles.configBox}>
+          <Text style={[Typography.bodySmall, { color: Colors.secondary, marginBottom: 6 }]}>
+            Change Backend URL (LAN IP or Tunnel):
+          </Text>
+          <TextInput
+            style={styles.urlInput}
+            value={inputUrl}
+            onChangeText={setInputUrl}
+            placeholder="http://192.168.2.19:8000"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', marginTop: 8 }}>
+            <TouchableOpacity
+              style={styles.saveBtn}
+              onPress={() => {
+                setApiBase(inputUrl);
+                setCurrentUrl(getApiBase());
+                setShowConfig(false);
+                fetchStatus();
+              }}
+            >
+              <Text style={styles.saveBtnText}>Connect & Re-sync</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {error && (
+        <View style={{ marginBottom: Spacing.sm }}>
+          <ErrorBanner message={error} onDismiss={() => setError(null)} />
+          <Text style={styles.troubleshootHint}>
+            💡 Tip: Ensure phone is on the same Wi-Fi. In Windows Settings, set your Wi-Fi profile to "Private Network" so Windows Firewall doesn't block port 8000.
+          </Text>
+        </View>
+      )}
 
       {/* Health Banner */}
       <View style={[
@@ -207,4 +264,75 @@ const styles = StyleSheet.create({
   },
   processInfo: { marginBottom: Spacing.sm },
   processButtons: { flexDirection: 'row', marginTop: Spacing.sm },
+  serverBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: Colors.white,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: Spacing.sm,
+  },
+  serverBarLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Colors.secondary,
+    marginRight: 4,
+  },
+  serverBarUrl: {
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: Colors.blue,
+    flex: 1,
+  },
+  serverBarBtnWrap: {
+    backgroundColor: Colors.blueLight,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: Radius.sm,
+  },
+  serverBarBtnText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Colors.blue,
+  },
+  configBox: {
+    backgroundColor: Colors.white,
+    padding: Spacing.sm,
+    borderRadius: Radius.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: Spacing.sm,
+  },
+  urlInput: {
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    borderRadius: Radius.sm,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: 6,
+    fontSize: 13,
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    color: Colors.heading,
+  },
+  saveBtn: {
+    backgroundColor: Colors.blue,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: Radius.sm,
+  },
+  saveBtnText: {
+    color: Colors.white,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  troubleshootHint: {
+    fontSize: 11,
+    color: Colors.secondary,
+    marginTop: 4,
+    lineHeight: 16,
+  },
 });
