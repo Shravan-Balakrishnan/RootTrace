@@ -24,7 +24,7 @@ from ..live_debug import (
     LiveRunStateStore,
     EvidenceLogIntelligenceAgent
 )
-from ..safety.auth import authenticate_and_authorize_approver
+from ..safety.auth import authenticate_and_authorize_approver, create_authenticated_session
 
 router = APIRouter(prefix="/api/live")
 
@@ -389,8 +389,17 @@ def promote_patch_to_live(req: PromoteRequest):
     """
     import os, shutil, pathlib
 
-    # Authenticate operator
-    principal = authenticate_and_authorize_approver(req.operator, req.password)
+    # Authenticate operator via email + password (issues ephemeral session, verifies credentials)
+    session = create_authenticated_session(req.operator, req.password)
+    principal = session.principal
+
+    # Enforce that only authorized approver roles can promote to live
+    normalized_role = principal.role.strip().lower().replace(" ", "_")
+    if normalized_role not in AUTHORIZED_APPROVER_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Principal '{principal.email}' with role '{principal.role}' is not authorized to promote patches. Authorized roles: {sorted(list(AUTHORIZED_APPROVER_ROLES))}"
+        )
 
     # Look up the run
     with _APPROVAL_LOCK:
