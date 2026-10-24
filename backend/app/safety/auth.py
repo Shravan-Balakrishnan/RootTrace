@@ -128,7 +128,7 @@ AUTHORIZED_APPROVER_ROLES: Set[str] = {
 }
 
 # Persistent shared SQLite session database path (shared across any number of uvicorn worker processes)
-DB_PATH = os.getenv("ROOTTRACE_SESSION_DB", os.path.join(os.path.dirname(__file__), "sessions.db"))
+DB_PATH = os.getenv("ROOTTRACE_SESSION_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "sessions.db"))
 
 
 def _get_db_connection() -> sqlite3.Connection:
