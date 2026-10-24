@@ -19,7 +19,7 @@ export function getApiBase(): string {
   if (envUrl && envUrl.trim().length > 0) {
     return envUrl.trim().replace(/\/$/, '');
   }
-  return 'http://192.168.2.19:8000';
+  return 'http://10.195.88.235:8000';
 }
 
 export function setApiBase(url: string) {
