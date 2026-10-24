@@ -68,9 +68,14 @@ def get_live_status():
     """Returns process, port, and health telemetry of the managed live-lab application."""
     proc = process_mgr.get_status()
     health = health_mon.check_health()
+    proc_dict = dict(proc)
+    proc_dict["running"] = proc_dict.get("is_running", False)
+    health_dict = health.model_dump()
+    health_dict["healthy"] = health_dict.get("is_healthy", False)
+    health_dict["status_code"] = health_dict.get("http_status")
     return {
-        "process": proc,
-        "health": health.model_dump(),
+        "process": proc_dict,
+        "health": health_dict,
         "application": "live-lab-checkout",
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     }
@@ -367,3 +372,101 @@ def get_audit_records():
         "recent_audits": [a.model_dump() for a in audit_store.get_recent_audits()],
         "historical_corpus": [c.model_dump() for c in audit_store._historical_corpus]
     }
+
+
+class PromoteRequest(BaseModel):
+    run_id: str
+    password: str
+    operator: str = "lead_sre@company.com"
+
+
+@router.post("/patch/promote")
+def promote_patch_to_live(req: PromoteRequest):
+    """
+    Promote a verified sandbox patch to the live-lab source directory.
+    Requires the same operator password as approval. Only succeeds if the
+    run is in VERIFIED state (all sandbox regression tests passed).
+    """
+    import os, shutil, pathlib
+
+    # Authenticate operator
+    principal = authenticate_and_authorize_approver(req.operator, req.password)
+
+    # Look up the run
+    with _APPROVAL_LOCK:
+        run_state = _ACTIVE_RUNS.get(req.run_id)
+
+    if not run_state:
+        # Try the state store for historical runs
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {req.run_id} not found in active sessions. Start a new investigation."
+        )
+
+    current_status = run_state.get("status", "")
+    if current_status not in ("VERIFIED",):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot promote: run {req.run_id} is in state '{current_status}'. Only VERIFIED runs can be promoted."
+        )
+
+    workspace_dir = run_state.get("workspace_dir", "")
+    if not workspace_dir or not pathlib.Path(workspace_dir).exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Workspace directory no longer exists. Cannot promote."
+        )
+
+    # Find the live-lab root (relative to the backend package location)
+    backend_root = pathlib.Path(__file__).parent.parent.parent.parent  # backend/../.. => RootTrace root
+    live_lab_dir = backend_root / "live-lab"
+    if not live_lab_dir.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"live-lab directory not found at expected path: {live_lab_dir}"
+        )
+
+    # Copy patched files from workspace to live-lab source
+    workspace_path = pathlib.Path(workspace_dir)
+    promoted_files = []
+    errors = []
+
+    investigation = run_state.get("investigation")
+    modified_files = run_state.get("modified_files", ["app/services.py"])
+    if not modified_files and investigation:
+        modified_files = ["app/services.py"]
+
+    for rel_path in modified_files:
+        src = workspace_path / rel_path
+        dst = live_lab_dir / rel_path
+        if src.exists():
+            try:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                promoted_files.append(rel_path)
+            except Exception as e:
+                errors.append(f"{rel_path}: {e}")
+        else:
+            errors.append(f"{rel_path}: not found in workspace")
+
+    if errors:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Promotion partially failed: {'; '.join(errors)}"
+        )
+
+    # Mark run as PROMOTED
+    with _APPROVAL_LOCK:
+        if run_state:
+            run_state["status"] = "PROMOTED"
+
+    return {
+        "success": True,
+        "run_id": req.run_id,
+        "status": "PROMOTED",
+        "promoted_files": promoted_files,
+        "promoted_to": str(live_lab_dir),
+        "operator": principal.email,
+        "message": f"Patch successfully promoted to live source. {len(promoted_files)} file(s) updated: {', '.join(promoted_files)}. Restart the live-lab process to apply."
+    }
+

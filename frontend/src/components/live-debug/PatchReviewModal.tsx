@@ -4,7 +4,7 @@ import { GitCommit, ShieldCheck, XCircle, CheckCircle2, Lock } from 'lucide-reac
 
 interface Props {
   proposal: PatchProposal;
-  onApprove: (token: string) => Promise<void>;
+  onApprove: (token: string, email: string, password: string) => Promise<void>;
   onReject: () => Promise<void>;
   isApplying: boolean;
 }
@@ -33,7 +33,7 @@ export const PatchReviewModal: React.FC<Props> = ({
         throw new Error(err.detail || 'Authentication failed: Invalid credentials.');
       }
       const data = await sessionRes.json();
-      await onApprove(data.session_token);
+      await onApprove(data.session_token, selectedEmail, password);
     } catch (e: any) {
       setErrorMessage(e.message || 'Approval failed');
     }

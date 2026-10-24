@@ -86,27 +86,68 @@ class LLMConfig(BaseModel):
 
 class LLMProvider:
     def __init__(self):
-        openai_key = os.getenv("OPENAI_API_KEY")
+        groq_keys: List[str] = []
+        for var in ["GROQ_API_KEY", "GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_3"]:
+            val = os.getenv(var)
+            if val:
+                for k in val.split(","):
+                    k = k.strip()
+                    if k and k not in groq_keys:
+                        groq_keys.append(k)
+
+        openai_keys: List[str] = []
+        for var in ["OPENAI_API_KEY", "OPENAI_API_KEY_1", "OPENAI_API_KEY_2", "OPENAI_API_KEY_3"]:
+            val = os.getenv(var)
+            if val:
+                for k in val.split(","):
+                    k = k.strip()
+                    if k and k not in openai_keys:
+                        openai_keys.append(k)
+
         gemini_key = os.getenv("GEMINI_API_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")
 
-        if openai_key:
-            self.api_key = openai_key
-            self.configured_provider = "openai"
+        self.api_keys: List[str] = []
+        self.active_key_index: int = 1 if (groq_keys or openai_keys) else 0
+
+        if groq_keys:
+            self.api_keys = groq_keys
+            self.api_key = groq_keys[0]
+            self.configured_provider = "groq"
+            self.base_url = base_url or os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
             self.state = "cloud_configured"
-            model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            model_name = os.getenv("GROQ_MODEL", os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b"))
+            self.last_error = None
+        elif openai_keys:
+            self.api_keys = openai_keys
+            self.api_key = openai_keys[0]
+            # Auto-detect Groq keys starting with gsk_ if no custom base_url specified
+            if self.api_key.startswith("gsk_") and not base_url:
+                self.configured_provider = "groq"
+                self.base_url = "https://api.groq.com/openai/v1"
+                model_name = os.getenv("OPENAI_MODEL", "openai/gpt-oss-20b")
+            else:
+                self.configured_provider = "openai"
+                self.base_url = base_url
+                model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+            self.state = "cloud_configured"
             self.last_error = None
         elif gemini_key or anthropic_key:
             # Explicitly declare unsupported in Phase 1 and fall back to deterministic mode
             unsupported = "Gemini" if gemini_key else "Anthropic"
             self.api_key = None
+            self.api_keys = []
+            self.base_url = None
             self.configured_provider = "deterministic"
             self.state = "deterministic"
-            self.last_error = f"{unsupported} provider configured but not supported in Phase 1 (OpenAI only). Falling back to deterministic reasoning."
+            self.last_error = f"{unsupported} provider configured but not supported in Phase 1 (OpenAI/Groq only). Falling back to deterministic reasoning."
             logger.warning(self.last_error)
             model_name = "deterministic-reasoner-v1"
         else:
             self.api_key = None
+            self.api_keys = []
+            self.base_url = None
             self.configured_provider = "deterministic"
             self.state = "deterministic"
             self.last_error = None
@@ -118,29 +159,48 @@ class LLMProvider:
             api_key_configured=bool(self.api_key),
             timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "15.0"))
         )
-        self._client = None
+        self._client_pool: List[Any] = []
         self._init_client()
 
+    @property
+    def _client(self) -> Optional[Any]:
+        return self._client_pool[0] if self._client_pool else None
+
+    @_client.setter
+    def _client(self, val: Any) -> None:
+        if val is None:
+            self._client_pool = []
+        elif not self._client_pool:
+            self._client_pool = [val]
+        else:
+            self._client_pool[0] = val
+
     def _init_client(self):
-        """Safely initialize API client if configured."""
-        if self.config.provider == "openai" and self.api_key:
+        """Safely initialize API client pool for all configured keys."""
+        self._client_pool = []
+        if self.config.provider in ("openai", "groq") and self.api_keys:
             try:
                 import openai
-                self._client = openai.OpenAI(
-                    api_key=self.api_key,
-                    timeout=self.config.timeout_seconds
-                )
+                for key in self.api_keys:
+                    client_kwargs = {
+                        "api_key": key,
+                        "timeout": self.config.timeout_seconds
+                    }
+                    if getattr(self, "base_url", None):
+                        client_kwargs["base_url"] = self.base_url
+                    self._client_pool.append(openai.OpenAI(**client_kwargs))
             except Exception as e:
                 self.state = "cloud_error"
-                self.last_error = f"Failed to initialize OpenAI client: {self._sanitize(str(e))}"
+                self.last_error = f"Failed to initialize AI client pool: {self._sanitize(str(e))}"
                 logger.warning(self.last_error)
 
     def _sanitize(self, text: str) -> str:
         """Strip any API key or secret tokens from error messages and logs."""
         if not text:
             return ""
-        # Redact known sk- or ghp- or bearer patterns
+        # Redact known sk- or gsk- or ghp- or bearer patterns
         cleaned = re.sub(r'sk-[a-zA-Z0-9_\-]{20,}', '[REDACTED_API_KEY]', text)
+        cleaned = re.sub(r'gsk_[a-zA-Z0-9_\-]{20,}', '[REDACTED_API_KEY]', cleaned)
         cleaned = re.sub(r'ghp_[a-zA-Z0-9_\-]{20,}', '[REDACTED_TOKEN]', cleaned)
         cleaned = re.sub(r'Bearer\s+[a-zA-Z0-9_\.\-]{20,}', 'Bearer [REDACTED]', cleaned)
         return cleaned
@@ -163,6 +223,8 @@ class LLMProvider:
             "provider": self.config.provider,
             "model_name": self.config.model_name,
             "api_key_configured": self.config.api_key_configured,
+            "total_keys_configured": len(self.api_keys),
+            "active_key_index": self.active_key_index,
             "state": self.state,
             "connected": is_connected,
             "mode": "CLOUD_AI" if is_connected else "DETERMINISTIC_REASONING_ENGINE",
@@ -176,43 +238,60 @@ class LLMProvider:
         response_model: Any
     ) -> Optional[Any]:
         """
-        Centralized safe model helper:
-        - Finite timeout
-        - JSON schema extraction
-        - Pydantic validation
+        Centralized safe model helper with Multi-Key Failover:
+        - Iterates over primary, secondary, and tertiary keys
+        - Automatic failover upon rate limits (429), timeouts, or errors
+        - Strict Pydantic validation
         - Safe logging without secrets
-        - Explicit error tracking and deterministic fallback
+        - Explicit error tracking and deterministic fallback only if all keys fail
         """
-        if not self._client or self.state == "deterministic":
+        if not self._client_pool or self.state == "deterministic":
             return None
 
-        try:
-            logger.info(f"Dispatching structured AI request to model: {self.config.model_name}")
-            completion = self._client.chat.completions.create(
-                model=self.config.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt + "\nRespond with valid JSON matching the schema strictly."},
-                    {"role": "user", "content": user_prompt}
-                ],
-                response_format={"type": "json_object"},
-                timeout=self.config.timeout_seconds,
-                temperature=0.2
-            )
-            raw_content = completion.choices[0].message.content
-            parsed_json = json.loads(raw_content)
-            validated = response_model.model_validate(parsed_json)
-            
-            # Transition to verified cloud_ready on success
-            self.state = "cloud_ready"
-            self.last_error = None
-            return validated
+        total_keys = len(self._client_pool)
+        last_exception = None
 
-        except Exception as e:
-            sanitized_err = self._sanitize(str(e))
+        for idx, client in enumerate(self._client_pool):
+            key_num = idx + 1
+            try:
+                logger.info(f"Dispatching structured AI request to {self.config.model_name} [Key {key_num}/{total_keys}]")
+                completion = client.chat.completions.create(
+                    model=self.config.model_name,
+                    messages=[
+                        {"role": "system", "content": system_prompt + "\nRespond with valid JSON matching the schema strictly."},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    timeout=self.config.timeout_seconds,
+                    temperature=0.2
+                )
+                raw_content = completion.choices[0].message.content
+                parsed_json = json.loads(raw_content)
+                validated = response_model.model_validate(parsed_json)
+
+                # Transition to verified cloud_ready on success
+                self.state = "cloud_ready"
+                self.active_key_index = key_num
+                self.last_error = None
+                return validated
+
+            except Exception as e:
+                sanitized_err = self._sanitize(str(e))
+                last_exception = e
+                if key_num < total_keys:
+                    logger.warning(f"Key #{key_num} failed ({type(e).__name__}): {sanitized_err}. Failing over to Key #{key_num + 1}...")
+                else:
+                    logger.warning(f"Key #{key_num} (final key) failed ({type(e).__name__}): {sanitized_err}.")
+                continue
+
+        # All keys in the pool failed -> trigger deterministic fallback
+        if last_exception:
+            sanitized_err = self._sanitize(str(last_exception))
             self.state = "cloud_error"
-            self.last_error = f"Model request failed ({type(e).__name__}): {sanitized_err}"
-            logger.warning(f"Cloud LLM invocation failed, activating deterministic fallback. Error: {self.last_error}")
-            return None
+            self.last_error = f"All {total_keys} API keys failed. Last error ({type(last_exception).__name__}): {sanitized_err}"
+            logger.warning(f"All cloud API keys exhausted, activating deterministic fallback. Error: {self.last_error}")
+
+        return None
 
     # --- Operation: Generate Competing Hypotheses ---
 

@@ -33,6 +33,16 @@ class RefundRequest(BaseModel):
     amount: float = Field(gt=0.0)
 
 
+@app.get("/")
+def index():
+    return {
+        "service": "live-lab-checkout",
+        "status": "ok",
+        "health_check": "/health",
+        "api_docs": "/docs"
+    }
+
+
 @app.get("/health")
 def health_check():
     """Liveness and readiness probe for RootTrace process monitoring."""

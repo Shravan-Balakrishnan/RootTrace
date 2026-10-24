@@ -7,6 +7,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 import os
+from .config import load_dotenv
+load_dotenv()
 
 from .api.routes import router as api_router
 from .api.live_routes import router as live_router

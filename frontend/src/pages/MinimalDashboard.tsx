@@ -10,13 +10,18 @@ import { LiveDebugConsole } from './LiveDebugConsole';
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LiveStatus {
   process: {
-    running: boolean;
+    running?: boolean;
+    is_running?: boolean;
     pid?: number;
+    port?: number;
     uptime_seconds?: number;
   };
   health: {
-    healthy: boolean;
+    healthy?: boolean;
+    is_healthy?: boolean;
+    status_label?: string;
     status_code?: number;
+    http_status?: number;
     latency_ms?: number;
   };
   application: string;
@@ -167,8 +172,8 @@ const Btn: React.FC<{
 
 // ─── HealthBanner ─────────────────────────────────────────────────────────────
 const HealthBanner: React.FC<{ status: LiveStatus | null; onRefresh: () => void }> = ({ status, onRefresh }) => {
-  const running = status?.process?.running ?? false;
-  const healthy = status?.health?.healthy ?? false;
+  const running = Boolean(status?.process?.is_running ?? status?.process?.running);
+  const healthy = Boolean(status?.health?.is_healthy ?? status?.health?.healthy);
   const ok = running && healthy;
   return (
     <div style={{
@@ -213,7 +218,7 @@ const ProcessControls: React.FC<{
   onRestart: () => Promise<void>;
   loading: boolean;
 }> = ({ status, onStart, onStop, onRestart, loading }) => {
-  const running = status?.process?.running ?? false;
+  const running = Boolean(status?.process?.is_running ?? status?.process?.running);
   return (
     <div style={{
       background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12,
@@ -286,7 +291,11 @@ const IncidentHistoryPanel: React.FC = () => {
   useEffect(() => {
     fetch('/api/memory/postmortems')
       .then(r => r.json())
-      .then(data => setPostmortems(Array.isArray(data) ? data.slice(0, 20) : []))
+      .then(data => {
+        // API returns { postmortems: [...], Count: N }
+        const list = Array.isArray(data) ? data : (data.postmortems ?? data.items ?? []);
+        setPostmortems(list.slice(0, 20));
+      })
       .catch(() => setPostmortems([]))
       .finally(() => setLoading(false));
   }, []);
@@ -315,22 +324,24 @@ const IncidentHistoryPanel: React.FC = () => {
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <div style={{
                 width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                background: pm.severity === 'HIGH' ? '#dc2626' : pm.severity === 'MEDIUM' ? '#f59e0b' : '#10b981',
+                background: pm.severity === 'CRITICAL' ? '#7c3aed' : pm.severity === 'HIGH' ? '#dc2626' : pm.severity === 'MEDIUM' ? '#f59e0b' : '#10b981',
               }} />
               <div>
-                <div style={{ fontSize: 13, fontWeight: 500, color: '#111827' }}>
-                  {pm.title || pm.incident_id || 'Untitled incident'}
+                <div style={{ fontSize: 13, fontWeight: 500, color: '#111827', maxWidth: 480, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {pm.incident_id ? `${pm.incident_id} · ` : ''}{pm.title || 'Untitled incident'}
                 </div>
                 <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                  {pm.affected_services?.join(', ') || '—'} · {pm.severity || '—'}
+                  {pm.severity || '—'} · {pm.started_at ? timeAgo(pm.started_at) : (pm.resolved_at ? timeAgo(pm.resolved_at) : '—')}
                 </div>
               </div>
             </div>
             <span style={{
               fontSize: 10, fontWeight: 600, letterSpacing: '0.04em',
-              background: '#f0fdf4', color: '#15803d', border: '1px solid #bbf7d0',
+              background: pm.verification_status === 'VERIFIED' ? '#f0fdf4' : '#eff6ff',
+              color: pm.verification_status === 'VERIFIED' ? '#15803d' : '#1d4ed8',
+              border: `1px solid ${pm.verification_status === 'VERIFIED' ? '#bbf7d0' : '#bfdbfe'}`,
               borderRadius: 4, padding: '2px 7px', whiteSpace: 'nowrap',
-            }}>RESOLVED</span>
+            }}>{pm.verification_status || 'RESOLVED'}</span>
           </div>
         ))}
       </div>
@@ -347,8 +358,9 @@ const AuditLogPanel: React.FC = () => {
     fetch('/api/live/audit')
       .then(r => r.json())
       .then(data => {
-        const list = Array.isArray(data) ? data : (data.records ?? []);
-        setRecords(list.slice(0, 25));
+        // API returns { recent_audits: [...], historical_corpus: [...] }
+        const list = Array.isArray(data) ? data : (data.recent_audits ?? data.records ?? []);
+        setRecords([...list].reverse().slice(0, 25));
       })
       .catch(() => setRecords([]))
       .finally(() => setLoading(false));
@@ -375,25 +387,27 @@ const AuditLogPanel: React.FC = () => {
             borderBottom: i < records.length - 1 ? '1px solid #f3f4f6' : 'none',
             display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
           }}>
-            <div>
+            <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, fontWeight: 500, color: '#111827' }}>
-                {rec.action ?? rec.event_type ?? 'Patch review'}
+                {rec.run_id ? `[${rec.run_id}] ` : ''}{rec.observed_failure ?? 'Patch review'}
               </div>
               <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 2 }}>
-                {rec.approver ?? rec.operator ?? '—'} · {rec.timestamp ? timeAgo(rec.timestamp) : '—'}
+                {rec.approver ?? '—'} ({rec.approver_role ?? 'operator'}) · {rec.timestamp ? timeAgo(rec.timestamp) : '—'}
               </div>
-              {rec.comment && (
-                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 3, fontStyle: 'italic' }}>"{rec.comment}"</div>
+              {rec.diagnosis && (
+                <div style={{ fontSize: 11, color: '#6b7280', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 420 }}>
+                  {rec.diagnosis.slice(0, 120)}{rec.diagnosis.length > 120 ? '…' : ''}
+                </div>
               )}
             </div>
             <span style={{
               fontSize: 10, fontWeight: 600, letterSpacing: '0.04em',
-              background: rec.approved ? '#f0fdf4' : '#fff1f2',
-              color: rec.approved ? '#15803d' : '#b91c1c',
-              border: `1px solid ${rec.approved ? '#bbf7d0' : '#fecdd3'}`,
-              borderRadius: 4, padding: '2px 7px', flexShrink: 0, marginTop: 2,
+              background: rec.recovery_verified ? '#f0fdf4' : '#fff1f2',
+              color: rec.recovery_verified ? '#15803d' : '#b91c1c',
+              border: `1px solid ${rec.recovery_verified ? '#bbf7d0' : '#fecdd3'}`,
+              borderRadius: 4, padding: '2px 7px', flexShrink: 0, marginTop: 2, whiteSpace: 'nowrap',
             }}>
-              {rec.approved ? 'APPROVED' : 'REJECTED'}
+              {rec.recovery_verified ? 'VERIFIED' : 'FAILED'}
             </span>
           </div>
         ))}
@@ -413,8 +427,8 @@ const OverviewPanel: React.FC<{
   pendingApprovals: number;
   onGoLive: () => void;
 }> = ({ status, onRefresh, onStart, onStop, onRestart, processLoading, pendingApprovals, onGoLive }) => {
-  const running = status?.process?.running ?? false;
-  const healthy = status?.health?.healthy ?? false;
+  const running = Boolean(status?.process?.is_running ?? status?.process?.running);
+  const healthy = Boolean(status?.health?.is_healthy ?? status?.health?.healthy);
 
   return (
     <div>
@@ -425,7 +439,7 @@ const OverviewPanel: React.FC<{
         <MetricCard
           label="Process Status" icon={<Activity size={14} />}
           value={<span style={{ color: running ? '#16a34a' : '#dc2626' }}>{running ? 'Running' : 'Stopped'}</span>}
-          sub={`PID ${status?.process?.pid ?? '—'} · Port 5001`}
+          sub={`PID ${status?.process?.pid ?? '—'} · Port ${status?.process?.port ?? 8001}`}
           accent={running ? 'green' : 'red'} onClick={onGoLive}
         />
         <MetricCard
@@ -523,8 +537,8 @@ export const MinimalDashboard: React.FC<MinimalDashboardProps> = ({ onOpenLegacy
   const handleStop    = async () => { setProcessLoading(true); try { await fetch('/api/live/process/stop',    { method: 'POST' }); await fetchStatus(); } finally { setProcessLoading(false); } };
   const handleRestart = async () => { setProcessLoading(true); try { await fetch('/api/live/process/restart', { method: 'POST' }); await fetchStatus(); } finally { setProcessLoading(false); } };
 
-  const running = status?.process?.running ?? false;
-  const healthy = status?.health?.healthy ?? false;
+  const running = Boolean(status?.process?.is_running ?? status?.process?.running);
+  const healthy = Boolean(status?.health?.is_healthy ?? status?.health?.healthy);
   const overall = running && healthy;
 
   const pageTitles: Record<string, string> = {

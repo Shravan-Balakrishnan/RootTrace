@@ -149,3 +149,94 @@ def test_mocked_cloud_llm_failure_safely_falls_back():
         assert provider.state == "cloud_error"
         assert "TimeoutError" in provider.last_error
         assert "sk-mock" not in provider.last_error  # No secrets leaked
+
+
+def test_groq_provider_configuration():
+    # Direct GROQ_API_KEY
+    with patch.dict(os.environ, {"GROQ_API_KEY": "gsk_test12345678901234567890", "OPENAI_API_KEY": ""}, clear=True):
+        provider = LLMProvider()
+        status = provider.get_status()
+        assert status["provider"] == "groq"
+        assert status["model_name"] == "openai/gpt-oss-20b"
+        assert status["api_key_configured"] is True
+        assert provider.base_url == "https://api.groq.com/openai/v1"
+        assert "gsk_test" not in str(status)
+
+    # OPENAI_API_KEY starting with gsk_ auto-detected
+    with patch.dict(os.environ, {"OPENAI_API_KEY": "gsk_autodetect1234567890123456", "GROQ_API_KEY": ""}, clear=True):
+        provider = LLMProvider()
+        status = provider.get_status()
+        assert status["provider"] == "groq"
+        assert status["model_name"] == "openai/gpt-oss-20b"
+        assert provider.base_url == "https://api.groq.com/openai/v1"
+
+
+def test_multi_key_failover_pool():
+    # 3 Keys configured (Primary, Secondary, Tertiary)
+    env = {
+        "GROQ_API_KEY": "gsk_primary12345678901234567890",
+        "GROQ_API_KEY_2": "gsk_secondary12345678901234567890",
+        "GROQ_API_KEY_3": "gsk_tertiary12345678901234567890",
+        "OPENAI_API_KEY": ""
+    }
+    with patch.dict(os.environ, env, clear=True):
+        provider = LLMProvider()
+        status = provider.get_status()
+        assert status["total_keys_configured"] == 3
+        assert len(provider._client_pool) == 3
+
+        # Key 1 fails with rate limit (429), Key 2 succeeds!
+        provider._client_pool[0].chat.completions.create = MagicMock(side_effect=Exception("Rate limit 429"))
+        mock_completion = MagicMock()
+        mock_completion.choices = [
+            MagicMock(message=MagicMock(content='''{
+                "hypotheses": [
+                    {
+                        "title": "Failover Hyp 1",
+                        "description": "Desc 1",
+                        "expected_evidence": ["ev1"],
+                        "evidence_still_needed": [],
+                        "falsification_criteria": "crit1"
+                    },
+                    {
+                        "title": "Failover Hyp 2",
+                        "description": "Desc 2",
+                        "expected_evidence": ["ev2"],
+                        "evidence_still_needed": [],
+                        "falsification_criteria": "crit2"
+                    }
+                ]
+            }'''))
+        ]
+        provider._client_pool[1].chat.completions.create = MagicMock(return_value=mock_completion)
+
+        obs = {"alert_name": "CallbackRaceDetected"}
+        hypotheses = provider.generate_competing_hypotheses(obs, [])
+
+        assert len(hypotheses) == 2
+        assert hypotheses[0].title == "Failover Hyp 1"
+        assert provider.state == "cloud_ready"
+        assert provider.active_key_index == 2  # Switched to Key 2!
+
+
+def test_multi_key_all_fail_falls_back():
+    env = {
+        "GROQ_API_KEY_1": "gsk_key1_12345678901234567890",
+        "GROQ_API_KEY_2": "gsk_key2_12345678901234567890",
+        "OPENAI_API_KEY": ""
+    }
+    with patch.dict(os.environ, env, clear=True):
+        provider = LLMProvider()
+        # Both keys fail
+        provider._client_pool[0].chat.completions.create = MagicMock(side_effect=Exception("Key 1 Rate Limit 429"))
+        provider._client_pool[1].chat.completions.create = MagicMock(side_effect=Exception("Key 2 Rate Limit 429"))
+
+        obs = {"alert_name": "CallbackRaceDetected"}
+        hypotheses = provider.generate_competing_hypotheses(obs, [])
+
+        # Gracefully falls back to deterministic reasoning without crashing
+        assert len(hypotheses) >= 2
+        assert provider.state == "cloud_error"
+        assert "All 2 API keys failed" in provider.last_error
+
+

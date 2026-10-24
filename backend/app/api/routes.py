@@ -380,6 +380,22 @@ def resume_autonomy():
 
 @router.get("/system/status")
 def system_status():
+    from ..config import load_dotenv
+    load_dotenv()
+    if not orchestrator.llm.config.api_key_configured or orchestrator.llm.config.provider == "deterministic":
+        orchestrator.llm = LLMProvider()
+    if orchestrator.llm.state == "cloud_configured" and orchestrator.llm._client:
+        try:
+            orchestrator.llm._client.chat.completions.create(
+                model=orchestrator.llm.config.model_name,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=2,
+                timeout=3.0
+            )
+            orchestrator.llm.state = "cloud_ready"
+        except Exception as e:
+            orchestrator.llm.state = "cloud_error"
+            orchestrator.llm.last_error = orchestrator.llm._sanitize(str(e))
     return {
         "status": "ONLINE",
         "llm": orchestrator.llm.get_status(),

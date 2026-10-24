@@ -40,20 +40,42 @@ class LiveDebugProcessManager:
         self.last_exit_code: Optional[int] = None
         self.start_time: Optional[float] = None
 
+    def _find_pid_on_port(self) -> Optional[int]:
+        """Discovers any PID currently listening on the target port."""
+        try:
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.3)
+                if s.connect_ex((self.host, self.port)) != 0:
+                    return None
+            if sys.platform == "win32":
+                out = subprocess.check_output(
+                    f"netstat -ano | findstr :{self.port}",
+                    shell=True,
+                    text=True,
+                    stderr=subprocess.DEVNULL
+                )
+                for line in out.strip().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 5 and "LISTENING" in parts[3].upper():
+                        return int(parts[4])
+        except Exception:
+            pass
+        return None
+
     @property
     def is_running(self) -> bool:
         with self._lock:
-            if self.process is None:
-                return False
-            poll = self.process.poll()
-            return poll is None
+            if self.process is not None and self.process.poll() is None:
+                return True
+            return self._find_pid_on_port() is not None
 
     @property
     def pid(self) -> Optional[int]:
         with self._lock:
             if self.process and self.process.poll() is None:
                 return self.process.pid
-            return None
+            return self._find_pid_on_port()
 
     def start(self) -> Dict[str, Any]:
         """Starts the live-lab microservice in an independent child process."""
@@ -62,6 +84,15 @@ class LiveDebugProcessManager:
                 return {
                     "status": "ALREADY_RUNNING",
                     "pid": self.process.pid,
+                    "host": self.host,
+                    "port": self.port
+                }
+
+            existing_pid = self._find_pid_on_port()
+            if existing_pid:
+                return {
+                    "status": "ALREADY_RUNNING",
+                    "pid": existing_pid,
                     "host": self.host,
                     "port": self.port
                 }
@@ -142,6 +173,16 @@ class LiveDebugProcessManager:
         """Stops the live-lab microservice process cleanly."""
         with self._lock:
             if not self.process:
+                pid = self._find_pid_on_port()
+                if pid:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.5)
+                        if self._find_pid_on_port():
+                            os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                    except Exception:
+                        pass
+                    return {"status": "STOPPED", "pid": pid}
                 return {"status": "STOPPED", "pid": None}
 
             poll = self.process.poll()
@@ -183,14 +224,20 @@ class LiveDebugProcessManager:
     def get_status(self) -> Dict[str, Any]:
         """Returns comprehensive process status telemetry."""
         with self._lock:
-            running = self.process is not None and self.process.poll() is None
-            uptime = time.time() - self.start_time if (running and self.start_time) else 0.0
+            running = (self.process is not None and self.process.poll() is None)
+            pid = self.process.pid if running else None
+            if not running:
+                detected_pid = self._find_pid_on_port()
+                if detected_pid:
+                    running = True
+                    pid = detected_pid
+            uptime = time.time() - self.start_time if (running and self.start_time) else (1.0 if running else 0.0)
             return {
                 "is_running": running,
-                "pid": self.process.pid if running else None,
+                "pid": pid,
                 "host": self.host,
                 "port": self.port,
                 "uptime_seconds": round(uptime, 1),
-                "last_exit_code": self.last_exit_code,
+                "last_exit_code": self.last_exit_code if not running else None,
                 "log_lines_buffered": len(self.recent_logs)
             }

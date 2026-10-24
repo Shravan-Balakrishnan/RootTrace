@@ -22,6 +22,8 @@ export const LiveDebugConsole: React.FC = () => {
   const [approvalOutcome, setApprovalOutcome] = useState<PatchApprovalResponse | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [showLogs, setShowLogs] = useState<boolean>(false);
+  const [operatorEmail, setOperatorEmail] = useState<string>('lead_sre@company.com');
+  const [operatorPassword, setOperatorPassword] = useState<string>('');
 
   const [isTesting, setIsTesting] = useState(false);
   const [isInvestigating, setIsInvestigating] = useState(false);
@@ -108,10 +110,12 @@ export const LiveDebugConsole: React.FC = () => {
     }
   };
 
-  const handleApprovePatch = async (token: string) => {
+  const handleApprovePatch = async (token: string, email?: string, pwd?: string) => {
     if (!investigation || !investigation.proposed_patch) return;
     setIsApplying(true);
     setErrorMsg(null);
+    if (email) setOperatorEmail(email);
+    if (pwd) setOperatorPassword(pwd);
     try {
       const res = await liveDebugApi.approvePatch({
         run_id: investigation.run_id,
@@ -223,6 +227,10 @@ export const LiveDebugConsole: React.FC = () => {
         <RecoveryVerification
           recovery={approvalOutcome.recovery_result}
           modifiedFiles={approvalOutcome.modified_files}
+          runId={investigation?.run_id}
+          operator={operatorEmail}
+          operatorPassword={operatorPassword}
+          onPromoted={fetchStatus}
         />
       )}
 
@@ -232,6 +240,7 @@ export const LiveDebugConsole: React.FC = () => {
           agentTraces={investigation.agent_traces}
           logIntelligence={investigation.log_intelligence}
           historicalCases={investigation.retrieved_historical_cases}
+          isVerified={Boolean(approvalOutcome?.recovery_result?.all_checks_passed ?? approvalOutcome?.success)}
         />
       )}
 
