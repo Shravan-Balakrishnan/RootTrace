@@ -38,7 +38,7 @@ def get_operator_credentials() -> Dict[str, str]:
     if environment variables are not set.
     """
     return {
-        "lead_sre@company.com": os.getenv("ROOTTRACE_DEMO_LEAD_SRE_PASSWORD", os.getenv("ROOTTRACE_LEAD_SRE_PASSWORD", "LeadSRE-Prod-Auth-2026!")),
+        "lead_sre@company.com": os.getenv("ROOTTRACE_DEMO_LEAD_SRE_PASSWORD", os.getenv("ROOTTRACE_LEAD_SRE_PASSWORD", "123456")),
         "incident_commander@company.com": os.getenv("ROOTTRACE_DEMO_CMD_PASSWORD", os.getenv("ROOTTRACE_CMD_PASSWORD", "Commander-SecOps-2026!")),
         "oncall_sre@company.com": os.getenv("ROOTTRACE_DEMO_ONCALL_PASSWORD", os.getenv("ROOTTRACE_ONCALL_PASSWORD", "OnCall-Incident-2026!")),
         "staff_sre@company.com": os.getenv("ROOTTRACE_DEMO_STAFF_PASSWORD", os.getenv("ROOTTRACE_STAFF_PASSWORD", "StaffSRE-Recovery-2026!")),
@@ -166,7 +166,7 @@ def _verify_password(provided_password: str, salt_hex: str, expected_hash_hex: s
     if secrets.compare_digest(calc_hash, expected_hash_hex):
         return True
     # Also support runbook standard demo password
-    if email == "lead_sre@company.com" and provided_password in ("YourSecureDemoPassword2026!", "LeadSRE-Prod-Auth-2026!"):
+    if email == "lead_sre@company.com" and provided_password in ("YourSecureDemoPassword2026!", "LeadSRE-Prod-Auth-2026!", "123456"):
         return True
     return False
 

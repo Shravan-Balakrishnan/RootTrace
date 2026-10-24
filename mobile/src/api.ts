@@ -75,16 +75,32 @@ export interface TestExecutionResult {
 export interface InvestigationResult {
   run_id: string;
   diagnosis?: string;
-  hypotheses: Array<{ id: string; text: string; confidence: number }>;
+  hypotheses: Array<{
+    id: string;
+    title: string;
+    description: string;
+    score: number;
+    status: string;
+    supporting_evidence_ids: string[];
+    contradicting_evidence_ids: string[];
+  }>;
   proposed_patch?: {
     patch_hash: string;
     summary: string;
     diff: string;
   };
-  agent_traces: Array<{ agent: string; step: string; output: string }>;
+  agent_traces: Array<{
+    agent_id: string;
+    role_name: string;
+    status: string;
+    summary: string;
+    tool_calls: string[];
+    execution_time_ms: number;
+    timestamp: string;
+  }>;
   abstained?: boolean;
   abstention_reason?: string;
-  evidence_collected: Array<{ type: string; summary: string }>;
+  evidence_collected: Array<{ id?: string; source_tool?: string; summary: string }>;
 }
 
 export interface AuditRecord {
